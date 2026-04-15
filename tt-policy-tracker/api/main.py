@@ -1,17 +1,19 @@
 """FastAPI internal API for the TT Policy Tracker."""
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
-from storage.database import get_session
-from storage.models import Base, Jurisdiction, PolicyItem, Subscription
+from storage.database import async_session, get_session
+from storage.models import Base, Jurisdiction, PolicyItem, RawDocument, Subscription
 
 logger = logging.getLogger(__name__)
 
@@ -241,4 +243,116 @@ async def get_stats(session: AsyncSession = Depends(get_session)):
         "total_items": total_items,
         "high_impact_items": high_impact,
         "total_jurisdictions": total_jurisdictions,
+    }
+
+
+# ── Admin: Pipeline Triggers ──────────────────────────────────────
+
+
+def _check_admin_token(token: str | None) -> bool:
+    """Verify admin token. If no token is configured, allow access (dev mode)."""
+    if not settings.admin_token:
+        return True
+    return token == settings.admin_token
+
+
+@app.get("/admin/run-pipeline")
+async def run_pipeline(
+    days_back: int = Query(default=30, le=90),
+    batch_size: int = Query(default=50, le=200),
+    token: str | None = Query(default=None),
+):
+    """Trigger ingestion + enrichment in one call.
+
+    Usage: /admin/run-pipeline?days_back=30&batch_size=50&token=YOUR_TOKEN
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    # Run in background so the request doesn't timeout
+    asyncio.create_task(_run_pipeline_task(days_back, batch_size))
+
+    return {
+        "status": "started",
+        "message": f"Pipeline started: ingesting {days_back} days back, then enriching up to {batch_size} docs. Check /admin/pipeline-status for progress.",
+    }
+
+
+# Simple in-memory status tracking
+_pipeline_status = {"running": False, "last_run": None, "last_result": None}
+
+
+@app.get("/admin/pipeline-status")
+async def pipeline_status(token: str | None = Query(default=None)):
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+    return _pipeline_status
+
+
+async def _run_pipeline_task(days_back: int, batch_size: int):
+    """Background task: ingest from all adapters, then enrich."""
+    global _pipeline_status
+    _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
+
+    results = {"ingested": 0, "enriched": 0, "irrelevant": 0, "errors": []}
+
+    try:
+        # ── Step 1: Ingest ──
+        from adapters.congress import CongressAdapter
+        from adapters.federal_register import FederalRegisterAdapter
+        from adapters.openstates import OpenStatesAdapter
+        from enrichment.pipeline import enrich_document, ingest_raw_doc
+
+        since = datetime.utcnow() - timedelta(days=days_back)
+        adapters = [OpenStatesAdapter(), CongressAdapter(), FederalRegisterAdapter()]
+
+        for adapter in adapters:
+            try:
+                docs = await adapter.fetch_new_items(since)
+                logger.info(f"{adapter.source_name}: fetched {len(docs)} docs")
+                async with async_session() as session:
+                    for doc in docs:
+                        raw = await ingest_raw_doc(session, doc)
+                        if raw:
+                            results["ingested"] += 1
+                    await session.commit()
+            except Exception as e:
+                err = f"{adapter.source_name}: {str(e)}"
+                logger.error(err, exc_info=True)
+                results["errors"].append(err)
+
+        # ── Step 2: Enrich ──
+        async with async_session() as session:
+            subquery = select(PolicyItem.raw_document_id)
+            query = (
+                select(RawDocument)
+                .where(RawDocument.id.notin_(subquery))
+                .order_by(RawDocument.fetched_at.desc())
+                .limit(batch_size)
+            )
+            result = await session.execute(query)
+            raw_docs = result.scalars().all()
+
+            for raw in raw_docs:
+                try:
+                    item = await enrich_document(session, raw)
+                    if item:
+                        results["enriched"] += 1
+                    else:
+                        results["irrelevant"] += 1
+                except Exception as e:
+                    err = f"enrich {raw.external_id}: {str(e)}"
+                    logger.error(err)
+                    results["errors"].append(err)
+
+            await session.commit()
+
+    except Exception as e:
+        results["errors"].append(f"pipeline error: {str(e)}")
+        logger.error(f"Pipeline failed: {e}", exc_info=True)
+
+    _pipeline_status = {
+        "running": False,
+        "last_run": datetime.utcnow().isoformat(),
+        "last_result": results,
     }

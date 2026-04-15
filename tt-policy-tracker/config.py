@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # CORS — set CORS_ORIGINS to a comma-separated list of allowed origins
     cors_origins: str = "http://localhost:3000"
 
+    # Admin token for triggering pipelines via the API (set a random string)
+    admin_token: str = ""
+
     @property
     def async_database_url(self) -> str:
         return _normalize_database_url(self.database_url)
