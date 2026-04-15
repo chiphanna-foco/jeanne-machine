@@ -1,0 +1,14 @@
+# Vercel should only build the Next.js app in web/ — ignore everything else
+*.py
+adapters/
+enrichment/
+storage/
+digest/
+api/
+cli/
+tests/
+*.toml
+*.ini
+Dockerfile*
+docker-compose.yml
+requirements.txt
