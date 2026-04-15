@@ -35,6 +35,10 @@ tt-ingest = "cli.ingest:main"
 tt-enrich = "cli.enrich:main"
 tt-digest = "cli.digest:main"
 
+[tool.setuptools.packages.find]
+include = ["adapters*", "enrichment*", "storage*", "digest*", "api*", "cli*"]
+exclude = ["tests*", "web*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
