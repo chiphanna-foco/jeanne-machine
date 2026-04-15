@@ -19,6 +19,61 @@ BASE_URL = "https://v3.openstates.org"
 # Phase 0: only OH and CO
 PHASE0_STATES = ["oh", "co"]
 
+# Open States API v3 requires OCD jurisdiction IDs
+STATE_TO_JURISDICTION = {
+    "al": "ocd-jurisdiction/country:us/state:al/government",
+    "ak": "ocd-jurisdiction/country:us/state:ak/government",
+    "az": "ocd-jurisdiction/country:us/state:az/government",
+    "ar": "ocd-jurisdiction/country:us/state:ar/government",
+    "ca": "ocd-jurisdiction/country:us/state:ca/government",
+    "co": "ocd-jurisdiction/country:us/state:co/government",
+    "ct": "ocd-jurisdiction/country:us/state:ct/government",
+    "de": "ocd-jurisdiction/country:us/state:de/government",
+    "fl": "ocd-jurisdiction/country:us/state:fl/government",
+    "ga": "ocd-jurisdiction/country:us/state:ga/government",
+    "hi": "ocd-jurisdiction/country:us/state:hi/government",
+    "id": "ocd-jurisdiction/country:us/state:id/government",
+    "il": "ocd-jurisdiction/country:us/state:il/government",
+    "in": "ocd-jurisdiction/country:us/state:in/government",
+    "ia": "ocd-jurisdiction/country:us/state:ia/government",
+    "ks": "ocd-jurisdiction/country:us/state:ks/government",
+    "ky": "ocd-jurisdiction/country:us/state:ky/government",
+    "la": "ocd-jurisdiction/country:us/state:la/government",
+    "me": "ocd-jurisdiction/country:us/state:me/government",
+    "md": "ocd-jurisdiction/country:us/state:md/government",
+    "ma": "ocd-jurisdiction/country:us/state:ma/government",
+    "mi": "ocd-jurisdiction/country:us/state:mi/government",
+    "mn": "ocd-jurisdiction/country:us/state:mn/government",
+    "ms": "ocd-jurisdiction/country:us/state:ms/government",
+    "mo": "ocd-jurisdiction/country:us/state:mo/government",
+    "mt": "ocd-jurisdiction/country:us/state:mt/government",
+    "ne": "ocd-jurisdiction/country:us/state:ne/government",
+    "nv": "ocd-jurisdiction/country:us/state:nv/government",
+    "nh": "ocd-jurisdiction/country:us/state:nh/government",
+    "nj": "ocd-jurisdiction/country:us/state:nj/government",
+    "nm": "ocd-jurisdiction/country:us/state:nm/government",
+    "ny": "ocd-jurisdiction/country:us/state:ny/government",
+    "nc": "ocd-jurisdiction/country:us/state:nc/government",
+    "nd": "ocd-jurisdiction/country:us/state:nd/government",
+    "oh": "ocd-jurisdiction/country:us/state:oh/government",
+    "ok": "ocd-jurisdiction/country:us/state:ok/government",
+    "or": "ocd-jurisdiction/country:us/state:or/government",
+    "pa": "ocd-jurisdiction/country:us/state:pa/government",
+    "ri": "ocd-jurisdiction/country:us/state:ri/government",
+    "sc": "ocd-jurisdiction/country:us/state:sc/government",
+    "sd": "ocd-jurisdiction/country:us/state:sd/government",
+    "tn": "ocd-jurisdiction/country:us/state:tn/government",
+    "tx": "ocd-jurisdiction/country:us/state:tx/government",
+    "ut": "ocd-jurisdiction/country:us/state:ut/government",
+    "vt": "ocd-jurisdiction/country:us/state:vt/government",
+    "va": "ocd-jurisdiction/country:us/state:va/government",
+    "wa": "ocd-jurisdiction/country:us/state:wa/government",
+    "wv": "ocd-jurisdiction/country:us/state:wv/government",
+    "wi": "ocd-jurisdiction/country:us/state:wi/government",
+    "wy": "ocd-jurisdiction/country:us/state:wy/government",
+    "dc": "ocd-jurisdiction/country:us/district:dc/government",
+}
+
 # Topics we consider relevant for pre-filtering via Open States subject tags
 RELEVANT_SUBJECTS = {
     "housing",
@@ -81,12 +136,17 @@ class OpenStatesAdapter(BaseAdapter):
         since_str = since.strftime("%Y-%m-%d")
 
         for state in self.states:
+            jurisdiction_id = STATE_TO_JURISDICTION.get(state.lower())
+            if not jurisdiction_id:
+                logger.warning(f"No OCD jurisdiction ID for state: {state}")
+                continue
+
             page = 1
             while True:
                 resp = await self.client.get(
                     f"{BASE_URL}/bills",
                     params={
-                        "jurisdiction": state,
+                        "jurisdiction": jurisdiction_id,
                         "updated_since": since_str,
                         "page": page,
                         "per_page": 50,
