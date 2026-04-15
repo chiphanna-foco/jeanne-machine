@@ -143,20 +143,27 @@ class OpenStatesAdapter(BaseAdapter):
 
             page = 1
             while True:
-                resp = await self.client.get(
-                    f"{BASE_URL}/bills",
-                    params={
-                        "jurisdiction": jurisdiction_id,
-                        "updated_since": since_str,
-                        "page": page,
-                        "per_page": 50,
-                    },
-                    headers=self._headers(),
-                )
+                try:
+                    resp = await self.client.get(
+                        f"{BASE_URL}/bills",
+                        params={
+                            "jurisdiction": jurisdiction_id,
+                            "updated_since": since_str,
+                            "page": page,
+                            "per_page": 50,
+                            "apikey": self.api_key,
+                        },
+                        headers=self._headers(),
+                        timeout=30.0,
+                    )
+                except Exception as req_err:
+                    raise Exception(
+                        f"Open States request failed for {state.upper()}: {type(req_err).__name__}: {req_err}"
+                    )
                 if resp.status_code != 200:
                     body = resp.text[:500]
                     raise Exception(
-                        f"Open States API error {resp.status_code} for {state.upper()}: {body}"
+                        f"Open States API {resp.status_code} for {state.upper()}: {body}"
                     )
                 data = resp.json()
                 results = data.get("results", [])
