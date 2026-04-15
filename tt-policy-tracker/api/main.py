@@ -6,7 +6,7 @@ from datetime import datetime
 
 from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
