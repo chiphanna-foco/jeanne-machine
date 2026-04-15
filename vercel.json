@@ -1,6 +1,0 @@
-{
-  "framework": "nextjs",
-  "installCommand": "cd tt-policy-tracker/web && npm install",
-  "buildCommand": "cd tt-policy-tracker/web && npm run build",
-  "outputDirectory": "tt-policy-tracker/web/.next"
-}
