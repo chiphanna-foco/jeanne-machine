@@ -1,6 +1,19 @@
 """Central configuration via pydantic-settings. Reads from env vars / .env file."""
 
+import os
+import re
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _normalize_database_url(url: str) -> str:
+    """Convert DATABASE_URL to asyncpg format for SQLAlchemy.
+
+    Railway provides DATABASE_URL as postgresql://... but SQLAlchemy async
+    needs postgresql+asyncpg://...  Also handles postgres:// (legacy Heroku style).
+    """
+    url = re.sub(r"^postgres(ql)?://", "postgresql+asyncpg://", url)
+    return url
 
 
 class Settings(BaseSettings):
@@ -12,7 +25,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     postmark_token: str = ""
 
-    # Database
+    # Database — Railway sets DATABASE_URL; we normalize it for asyncpg
     database_url: str = "postgresql+asyncpg://tracker:tracker@localhost:5432/policy_tracker"
 
     # S3
@@ -28,6 +41,27 @@ class Settings(BaseSettings):
 
     # Enrichment thresholds
     relevance_confidence_threshold: float = 0.6
+
+    # Server
+    port: int = 8000
+
+    # CORS — set CORS_ORIGINS to a comma-separated list of allowed origins
+    cors_origins: str = "http://localhost:3000"
+
+    @property
+    def async_database_url(self) -> str:
+        return _normalize_database_url(self.database_url)
+
+    @property
+    def sync_database_url(self) -> str:
+        """For Alembic and table creation (sync driver)."""
+        url = self.database_url
+        url = re.sub(r"^postgres(ql)?(\+asyncpg)?://", "postgresql://", url)
+        return url
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 settings = Settings()

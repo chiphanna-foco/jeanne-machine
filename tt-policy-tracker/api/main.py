@@ -1,27 +1,47 @@
 """FastAPI internal API for the TT Policy Tracker."""
 
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from storage.database import get_session
-from storage.models import Jurisdiction, PolicyItem, Subscription
+from storage.models import Base, Jurisdiction, PolicyItem, Subscription
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Run DB migrations / table creation on startup."""
+    try:
+        sync_engine = create_engine(settings.sync_database_url)
+        with sync_engine.connect() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            conn.commit()
+        Base.metadata.create_all(sync_engine)
+        sync_engine.dispose()
+        logger.info("Database tables ready")
+    except Exception as e:
+        logger.warning(f"Auto-migration on startup failed (ok if tables exist): {e}")
+    yield
+
 
 app = FastAPI(
     title="TT Policy Tracker API",
     description="Internal API for the TurboTenant Legislative Policy Tracker",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Next.js dev server
+    allow_origins=settings.cors_origin_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
