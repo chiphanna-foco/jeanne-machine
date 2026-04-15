@@ -1,0 +1,48 @@
+[project]
+name = "tt-policy-tracker"
+version = "0.1.0"
+description = "TurboTenant Legislative Policy Tracker — Phase 0"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx[http2]>=0.27",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "pgvector>=0.3",
+    "anthropic>=0.42",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "jinja2>=3.1",
+    "python-dateutil>=2.9",
+    "postmarker>=1.0",
+    "click>=8.1",
+    "tenacity>=9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[project.scripts]
+tt-ingest = "cli.ingest:main"
+tt-enrich = "cli.enrich:main"
+tt-digest = "cli.digest:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.backends._legacy:_Backend"

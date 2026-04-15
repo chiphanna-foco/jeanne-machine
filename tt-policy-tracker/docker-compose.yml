@@ -1,0 +1,70 @@
+version: "3.9"
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: policy_tracker
+      POSTGRES_USER: tracker
+      POSTGRES_PASSWORD: tracker
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tracker -d policy_tracker"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tracker:tracker@db:5432/policy_tracker
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      sh -c "
+        cd /app &&
+        python -c 'from storage.models import Base; from sqlalchemy import create_engine; engine = create_engine(\"postgresql://tracker:tracker@db:5432/policy_tracker\"); Base.metadata.create_all(engine); print(\"Tables created\")' &&
+        uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+    volumes:
+      - .:/app
+
+  worker:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tracker:tracker@db:5432/policy_tracker
+    depends_on:
+      db:
+        condition: service_healthy
+    # The worker can run ingestion + enrichment on a schedule
+    # For dev, it just sits idle — use `docker compose exec worker python -m cli.ingest` to trigger manually
+    command: >
+      sh -c "
+        echo 'Worker ready. Use docker compose exec to run commands:' &&
+        echo '  docker compose exec worker python -m cli.ingest --days-back 7' &&
+        echo '  docker compose exec worker python -m cli.enrich' &&
+        echo '  docker compose exec worker python -m cli.digest --frequency weekly --force' &&
+        tail -f /dev/null
+      "
+    volumes:
+      - .:/app
+
+  # Optional: local SMTP server for testing digests without Postmark
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # Web UI
+
+volumes:
+  pgdata:
