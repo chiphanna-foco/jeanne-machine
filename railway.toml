@@ -1,6 +1,7 @@
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "Dockerfile"
+dockerfilePath = "tt-policy-tracker/Dockerfile"
+watchPatterns = ["tt-policy-tracker/**"]
 
 [deploy]
 healthcheckPath = "/health"

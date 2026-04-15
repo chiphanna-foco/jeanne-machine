@@ -8,13 +8,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies first (better layer caching)
-COPY tt-policy-tracker/requirements.txt .
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source
-COPY tt-policy-tracker/ .
+COPY . .
 
-# Railway provides $PORT; default to 8000 for local dev
 ENV PORT=8000
 
 EXPOSE ${PORT}
