@@ -13,9 +13,12 @@ export function StatsBar() {
 
   useEffect(() => {
     fetch("/api/stats")
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error(`API returned ${r.status}`);
+        return r.json();
+      })
       .then(setStats)
-      .catch(() => {});
+      .catch(() => setStats(null));
   }, []);
 
   if (!stats) return null;

@@ -33,6 +33,7 @@ export default function Dashboard() {
   const [items, setItems] = useState<PolicyItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [filters, setFilters] = useState<{
     topic?: string;
     impact?: string;
@@ -48,12 +49,20 @@ export default function Dashboard() {
 
     setLoading(true);
     fetch(`${API_BASE}/items?${params}`)
-      .then((r) => r.json())
-      .then((data: ApiResponse) => {
-        setItems(data.items);
-        setTotal(data.total);
+      .then((r) => {
+        if (!r.ok) throw new Error(`API returned ${r.status}`);
+        return r.json();
       })
-      .catch((err) => console.error("Failed to fetch items:", err))
+      .then((data: ApiResponse) => {
+        setItems(data.items || []);
+        setTotal(data.total || 0);
+      })
+      .catch((err) => {
+        console.error("Failed to fetch items:", err);
+        setError("Could not connect to the API backend. Make sure NEXT_PUBLIC_API_URL is configured.");
+        setItems([]);
+        setTotal(0);
+      })
       .finally(() => setLoading(false));
   }, [filters]);
 
@@ -82,7 +91,23 @@ export default function Dashboard() {
         ))}
       </div>
 
-      {!loading && items.length === 0 && (
+      {error && (
+        <div
+          style={{
+            background: "#fef2f2",
+            border: "1px solid #fecaca",
+            borderRadius: 8,
+            padding: "12px 16px",
+            marginBottom: 16,
+            color: "#991b1b",
+            fontSize: 13,
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      {!loading && !error && items.length === 0 && (
         <div
           style={{
             textAlign: "center",
