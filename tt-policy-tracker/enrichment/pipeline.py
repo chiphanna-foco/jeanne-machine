@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 async def ensure_source_adapter(session: AsyncSession, name: str) -> int:
     """Get or create a SourceAdapter row, return its id."""
     result = await session.execute(select(SourceAdapter).where(SourceAdapter.name == name))
-    adapter = result.scalar_one_or_none()
+    adapter = result.scalars().first()
     if adapter:
         return adapter.id
 
@@ -46,7 +46,7 @@ async def ensure_jurisdiction(
         Jurisdiction.name == name, Jurisdiction.level == level
     )
     result = await session.execute(query)
-    jur = result.scalar_one_or_none()
+    jur = result.scalars().first()
     if jur:
         return jur.id
 
@@ -64,7 +64,7 @@ async def ingest_raw_doc(session: AsyncSession, doc: RawDoc) -> RawDocument | No
     existing = await session.execute(
         select(RawDocument).where(RawDocument.content_hash == content_hash)
     )
-    if existing.scalar_one_or_none():
+    if existing.scalars().first():
         logger.debug(f"Skipping duplicate: {doc.external_id}")
         return None
 

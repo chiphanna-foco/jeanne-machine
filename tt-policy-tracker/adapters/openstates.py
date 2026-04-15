@@ -153,7 +153,11 @@ class OpenStatesAdapter(BaseAdapter):
                     },
                     headers=self._headers(),
                 )
-                resp.raise_for_status()
+                if resp.status_code != 200:
+                    body = resp.text[:500]
+                    raise Exception(
+                        f"Open States API error {resp.status_code} for {state.upper()}: {body}"
+                    )
                 data = resp.json()
                 results = data.get("results", [])
 
