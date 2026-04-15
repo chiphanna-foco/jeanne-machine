@@ -99,7 +99,7 @@ class OpenStatesAdapter(BaseAdapter):
         return "openstates"
 
     def __init__(self, client: httpx.AsyncClient | None = None, states: list[str] | None = None):
-        super().__init__(client)
+        super().__init__(client or httpx.AsyncClient(timeout=120.0))
         self.states = states or PHASE0_STATES
         self.api_key = settings.openstates_api_key
 
@@ -141,8 +141,30 @@ class OpenStatesAdapter(BaseAdapter):
                 logger.warning(f"No OCD jurisdiction ID for state: {state}")
                 continue
 
-            page = 1
-            while True:
+            try:
+                state_docs = await self._fetch_state_bills(state, jurisdiction_id, since_str)
+                docs.extend(state_docs)
+                logger.info(f"OpenStates: fetched {len(state_docs)} bills from {state.upper()} since {since_str}")
+            except Exception as e:
+                logger.error(f"OpenStates: failed for {state.upper()}: {e}")
+                # Continue with other states instead of aborting
+
+        return docs
+
+    async def _fetch_state_bills(self, state: str, jurisdiction_id: str, since_str: str) -> list[RawDoc]:
+        """Fetch bills for a single state with retries and smaller page size."""
+        import asyncio
+
+        docs = []
+        page = 1
+        max_pages = 5  # Cap to avoid runaway pagination
+
+        while page <= max_pages:
+            resp = None
+            last_err = None
+
+            # Retry up to 3 times per page
+            for attempt in range(3):
                 try:
                     resp = await self.client.get(
                         f"{BASE_URL}/bills",
@@ -150,39 +172,39 @@ class OpenStatesAdapter(BaseAdapter):
                             "jurisdiction": jurisdiction_id,
                             "updated_since": since_str,
                             "page": page,
-                            "per_page": 50,
+                            "per_page": 20,
                             "apikey": self.api_key,
                         },
                         headers=self._headers(),
-                        timeout=30.0,
                     )
+                    break
                 except Exception as req_err:
-                    raise Exception(
-                        f"Open States request failed for {state.upper()}: {type(req_err).__name__}: {req_err}"
-                    )
-                if resp.status_code != 200:
-                    body = resp.text[:500]
-                    raise Exception(
-                        f"Open States API {resp.status_code} for {state.upper()}: {body}"
-                    )
-                data = resp.json()
-                results = data.get("results", [])
+                    last_err = req_err
+                    logger.warning(f"OpenStates {state.upper()} page {page} attempt {attempt+1} failed: {type(req_err).__name__}")
+                    await asyncio.sleep(2 * (attempt + 1))
 
-                if not results:
-                    break
+            if resp is None:
+                raise Exception(f"Open States request failed for {state.upper()} after 3 retries: {type(last_err).__name__}: {last_err}")
 
-                for bill in results:
-                    doc = self._normalize_bill(bill, state)
-                    if doc:
-                        docs.append(doc)
+            if resp.status_code != 200:
+                body = resp.text[:500]
+                raise Exception(f"Open States API {resp.status_code} for {state.upper()}: {body}")
 
-                # Check for next page
-                pagination = data.get("pagination", {})
-                if page >= pagination.get("max_page", 1):
-                    break
-                page += 1
+            data = resp.json()
+            results = data.get("results", [])
 
-            logger.info(f"OpenStates: fetched {len(docs)} bills from {state.upper()} since {since_str}")
+            if not results:
+                break
+
+            for bill in results:
+                doc = self._normalize_bill(bill, state)
+                if doc:
+                    docs.append(doc)
+
+            pagination = data.get("pagination", {})
+            if page >= pagination.get("max_page", 1):
+                break
+            page += 1
 
         return docs
 
