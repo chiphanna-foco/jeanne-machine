@@ -356,3 +356,111 @@ async def _run_pipeline_task(days_back: int, batch_size: int):
         "last_run": datetime.utcnow().isoformat(),
         "last_result": results,
     }
+
+
+@app.get("/admin/run-enrich")
+async def run_enrich_only(
+    batch_size: int = Query(default=200, le=500),
+    min_confidence: float = Query(default=0.5),
+    token: str | None = Query(default=None),
+):
+    """Run enrichment only (no ingestion). Optionally lower the confidence threshold.
+
+    Usage: /admin/run-enrich?batch_size=200&min_confidence=0.4&token=YOUR_TOKEN
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    asyncio.create_task(_run_enrich_task(batch_size, min_confidence))
+
+    return {
+        "status": "started",
+        "message": f"Enrichment started: batch_size={batch_size}, min_confidence={min_confidence}. Check /admin/pipeline-status for progress.",
+    }
+
+
+async def _run_enrich_task(batch_size: int, min_confidence: float):
+    global _pipeline_status
+    _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
+
+    results = {"enriched": 0, "irrelevant": 0, "errors": []}
+
+    try:
+        from enrichment.classifier import classify_document
+        from enrichment.summarizer import summarize_document
+
+        # Temporarily override the confidence threshold
+        original_threshold = settings.relevance_confidence_threshold
+        settings.relevance_confidence_threshold = min_confidence
+
+        async with async_session() as session:
+            subquery = select(PolicyItem.raw_document_id)
+            query = (
+                select(RawDocument)
+                .where(RawDocument.id.notin_(subquery))
+                .order_by(RawDocument.fetched_at.desc())
+                .limit(batch_size)
+            )
+            result = await session.execute(query)
+            raw_docs = result.scalars().all()
+
+            logger.info(f"Enrich-only: {len(raw_docs)} docs to process")
+
+            from enrichment.pipeline import enrich_document
+
+            for raw in raw_docs:
+                try:
+                    item = await enrich_document(session, raw)
+                    if item:
+                        results["enriched"] += 1
+                    else:
+                        results["irrelevant"] += 1
+                except Exception as e:
+                    results["errors"].append(f"enrich {raw.external_id}: {str(e)}")
+
+            await session.commit()
+
+        settings.relevance_confidence_threshold = original_threshold
+
+    except Exception as e:
+        results["errors"].append(f"enrich error: {str(e)}")
+
+    _pipeline_status = {
+        "running": False,
+        "last_run": datetime.utcnow().isoformat(),
+        "last_result": results,
+    }
+
+
+@app.get("/admin/db-stats")
+async def db_stats(
+    token: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Show detailed database counts for debugging."""
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    total_raw = (await session.execute(select(func.count(RawDocument.id)))).scalar() or 0
+    total_enriched = (await session.execute(select(func.count(PolicyItem.id)))).scalar() or 0
+
+    # Count un-enriched (raw docs without a policy item)
+    subquery = select(PolicyItem.raw_document_id)
+    unenriched = (await session.execute(
+        select(func.count(RawDocument.id)).where(RawDocument.id.notin_(subquery))
+    )).scalar() or 0
+
+    # Sample some raw doc titles to see what we're getting
+    sample_q = select(RawDocument.external_id, RawDocument.raw_text).order_by(RawDocument.fetched_at.desc()).limit(5)
+    sample_result = await session.execute(sample_q)
+    samples = [
+        {"external_id": r[0], "preview": (r[1] or "")[:200]}
+        for r in sample_result.all()
+    ]
+
+    return {
+        "total_raw_documents": total_raw,
+        "total_enriched_items": total_enriched,
+        "unenriched_remaining": unenriched,
+        "recent_raw_samples": samples,
+    }
