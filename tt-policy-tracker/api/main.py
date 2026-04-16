@@ -322,30 +322,35 @@ async def _run_pipeline_task(days_back: int, batch_size: int):
                 results["errors"].append(err)
 
         # ── Step 2: Enrich ──
+        # First fetch the list of raw docs to process (in its own session)
         async with async_session() as session:
             subquery = select(PolicyItem.raw_document_id)
             query = (
-                select(RawDocument)
+                select(RawDocument.id)
                 .where(RawDocument.id.notin_(subquery))
                 .order_by(RawDocument.fetched_at.desc())
                 .limit(batch_size)
             )
             result = await session.execute(query)
-            raw_docs = result.scalars().all()
+            raw_ids = list(result.scalars().all())
 
-            for raw in raw_docs:
-                try:
+        # Then enrich each doc in its own session — one failure won't kill the batch
+        for raw_id in raw_ids:
+            try:
+                async with async_session() as session:
+                    raw = await session.get(RawDocument, raw_id)
+                    if not raw:
+                        continue
                     item = await enrich_document(session, raw)
                     if item:
                         results["enriched"] += 1
                     else:
                         results["irrelevant"] += 1
-                except Exception as e:
-                    err = f"enrich {raw.external_id}: {str(e)}"
-                    logger.error(err)
-                    results["errors"].append(err)
-
-            await session.commit()
+                    await session.commit()
+            except Exception as e:
+                err = f"enrich raw_id={raw_id}: {type(e).__name__}: {str(e)[:300]}"
+                logger.error(err)
+                results["errors"].append(err)
 
     except Exception as e:
         results["errors"].append(f"pipeline error: {str(e)}")
@@ -396,29 +401,32 @@ async def _run_enrich_task(batch_size: int, min_confidence: float):
         async with async_session() as session:
             subquery = select(PolicyItem.raw_document_id)
             query = (
-                select(RawDocument)
+                select(RawDocument.id)
                 .where(RawDocument.id.notin_(subquery))
                 .order_by(RawDocument.fetched_at.desc())
                 .limit(batch_size)
             )
             result = await session.execute(query)
-            raw_docs = result.scalars().all()
+            raw_ids = list(result.scalars().all())
 
-            logger.info(f"Enrich-only: {len(raw_docs)} docs to process")
+        logger.info(f"Enrich-only: {len(raw_ids)} docs to process")
 
-            from enrichment.pipeline import enrich_document
+        from enrichment.pipeline import enrich_document
 
-            for raw in raw_docs:
-                try:
+        for raw_id in raw_ids:
+            try:
+                async with async_session() as session:
+                    raw = await session.get(RawDocument, raw_id)
+                    if not raw:
+                        continue
                     item = await enrich_document(session, raw)
                     if item:
                         results["enriched"] += 1
                     else:
                         results["irrelevant"] += 1
-                except Exception as e:
-                    results["errors"].append(f"enrich {raw.external_id}: {str(e)}")
-
-            await session.commit()
+                    await session.commit()
+            except Exception as e:
+                results["errors"].append(f"enrich raw_id={raw_id}: {type(e).__name__}: {str(e)[:300]}")
 
         settings.relevance_confidence_threshold = original_threshold
 

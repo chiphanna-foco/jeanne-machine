@@ -97,7 +97,7 @@ async def enrich_document(session: AsyncSession, raw: RawDocument) -> PolicyItem
     existing = await session.execute(
         select(PolicyItem).where(PolicyItem.raw_document_id == raw.id)
     )
-    if existing.scalar_one_or_none():
+    if existing.scalars().first():
         logger.debug(f"Already enriched: raw_document_id={raw.id}")
         return None
 
