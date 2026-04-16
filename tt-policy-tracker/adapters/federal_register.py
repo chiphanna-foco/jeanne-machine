@@ -15,12 +15,15 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.federalregister.gov/api/v1"
 
-# Federal Register agency slugs and CFR references relevant to rental housing
+# Federal Register agency slugs relevant to rental housing policy.
+# "justice-department" was too broad (antitrust, wildlife, clean air).
+# Using specific sub-agencies + targeted keyword searches for DOJ fair housing.
 RELEVANT_AGENCIES = [
     "housing-and-urban-development-department",
     "federal-housing-finance-agency",
     "consumer-financial-protection-bureau",
-    "justice-department",
+    "federal-trade-commission",
+    "rural-housing-service",
 ]
 
 SEARCH_TERMS = [
@@ -107,8 +110,17 @@ class FederalRegisterAdapter(BaseAdapter):
                     break
                 page += 1
 
-        # Also do targeted keyword searches but cap results heavily
-        targeted_terms = ["landlord tenant", "eviction moratorium", "rent control", "tenant screening"]
+        # Targeted keyword searches for topics that span agencies (e.g. DOJ fair housing)
+        targeted_terms = [
+            "landlord tenant",
+            "eviction moratorium",
+            "rent control",
+            "tenant screening",
+            "fair housing act",
+            "housing discrimination",
+            "rental housing",
+            "section 8 voucher",
+        ]
         for term in targeted_terms:
             resp = await self.client.get(
                 f"{BASE_URL}/documents.json",

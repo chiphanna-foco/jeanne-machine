@@ -494,3 +494,134 @@ async def reset_raw_documents(
     await session.commit()
 
     return {"status": "ok", "message": "All raw documents and policy items deleted. Run the pipeline again to re-ingest."}
+
+
+# ── Cron: Daily Pipeline ──────────────────────────────────────────
+
+
+@app.get("/admin/cron-daily")
+async def cron_daily(token: str | None = Query(default=None)):
+    """Cron-friendly endpoint: ingest last 3 days + enrich up to 50 docs.
+
+    Set up a Railway cron service or external cron to hit this daily:
+      GET /admin/cron-daily?token=YOUR_TOKEN
+
+    Uses a 3-day lookback (not 1) to catch items published on weekends
+    or that appeared late in a feed.
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    asyncio.create_task(_run_pipeline_task(days_back=3, batch_size=50))
+    return {"status": "started", "message": "Daily cron pipeline started (3 days back, 50 enrichment batch)."}
+
+
+@app.get("/admin/cron-weekly-digest")
+async def cron_weekly_digest(token: str | None = Query(default=None)):
+    """Cron-friendly endpoint: send weekly digest to all active subscribers.
+
+    Set up a cron to hit this every Monday morning:
+      GET /admin/cron-weekly-digest?token=YOUR_TOKEN
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    asyncio.create_task(_run_digest_task("weekly"))
+    return {"status": "started", "message": "Weekly digest task started."}
+
+
+# ── Admin: Digest ──────────────────────────────────────────────────
+
+
+@app.get("/admin/send-digest")
+async def send_digest(
+    frequency: str = Query(default="weekly"),
+    token: str | None = Query(default=None),
+):
+    """Trigger a digest email for all active subscriptions of the given frequency.
+
+    Usage: /admin/send-digest?frequency=weekly&token=YOUR_TOKEN
+
+    If no subscriptions exist, creates a default one for the configured
+    DIGEST_RECIPIENT.
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    if frequency not in ("daily", "weekly"):
+        return JSONResponse(status_code=400, content={"error": "frequency must be 'daily' or 'weekly'"})
+
+    asyncio.create_task(_run_digest_task(frequency))
+    return {"status": "started", "message": f"Digest ({frequency}) task started. Check /admin/pipeline-status for results."}
+
+
+async def _run_digest_task(frequency: str):
+    """Background task: build and send digests for all matching subscriptions."""
+    global _pipeline_status
+    _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
+
+    results = {"sent": 0, "skipped": 0, "errors": []}
+
+    try:
+        from digest.builder import build_digest
+        from digest.sender import send_via_postmark
+        from storage.models import DigestSend
+
+        async with async_session() as session:
+            query = select(Subscription).where(
+                Subscription.active.is_(True),
+                Subscription.frequency == frequency,
+            )
+            result = await session.execute(query)
+            subs = result.scalars().all()
+
+            # Auto-create a default subscription if none exist
+            if not subs:
+                default_sub = Subscription(
+                    user_id="admin",
+                    email=settings.digest_recipient,
+                    frequency=frequency,
+                    active=True,
+                )
+                session.add(default_sub)
+                await session.flush()
+                subs = [default_sub]
+                logger.info(f"Created default {frequency} subscription for {settings.digest_recipient}")
+
+            for sub in subs:
+                try:
+                    html, item_ids = await build_digest(session, sub)
+
+                    if not item_ids:
+                        results["skipped"] += 1
+                        logger.info(f"No new items for {sub.email}")
+                        continue
+
+                    subject = f"TT Policy Tracker — {frequency.title()} Digest ({len(item_ids)} items)"
+                    message_id = await send_via_postmark(sub.email, subject, html)
+
+                    digest_send = DigestSend(
+                        subscription_id=sub.id,
+                        item_ids=item_ids,
+                        message_id=message_id,
+                    )
+                    session.add(digest_send)
+                    sub.last_sent_at = datetime.utcnow()
+                    results["sent"] += 1
+                    logger.info(f"Digest sent to {sub.email} ({len(item_ids)} items)")
+
+                except Exception as e:
+                    err = f"digest for {sub.email}: {str(e)[:300]}"
+                    logger.error(err)
+                    results["errors"].append(err)
+
+            await session.commit()
+
+    except Exception as e:
+        results["errors"].append(f"digest error: {str(e)[:300]}")
+
+    _pipeline_status = {
+        "running": False,
+        "last_run": datetime.utcnow().isoformat(),
+        "last_result": results,
+    }
