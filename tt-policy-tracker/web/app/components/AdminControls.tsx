@@ -48,6 +48,12 @@ const ACTIONS: Action[] = [
     description: "Send a weekly digest to the configured Slack channel.",
     path: "/admin/send-slack-digest?frequency=weekly&days_back=7",
   },
+  {
+    key: "drafts",
+    label: "Generate Blog Drafts",
+    description: "Create AI-written blog post drafts from high-impact policy items.",
+    path: "/admin/generate-drafts?min_impact=high&max_drafts=5",
+  },
 ];
 
 function formatTimestamp(iso: string | null): string {

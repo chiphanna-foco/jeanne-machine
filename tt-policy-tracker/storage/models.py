@@ -180,3 +180,30 @@ class LawSnapshot(Base):
     )
 
     jurisdiction: Mapped["Jurisdiction"] = relationship()
+
+
+class ContentDraft(Base):
+    """AI-generated draft blog post or social content from a high-impact PolicyItem."""
+
+    __tablename__ = "content_draft"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    policy_item_id: Mapped[int] = mapped_column(
+        ForeignKey("policy_item.id"), nullable=False, unique=True
+    )
+    content_type: Mapped[str] = mapped_column(
+        Enum("blog_post", "social_post", "newsletter_blurb", name="content_type"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    seo_description: Mapped[str | None] = mapped_column(Text)
+    suggested_tags: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+    status: Mapped[str] = mapped_column(
+        Enum("draft", "approved", "rejected", "published", name="draft_status"),
+        default="draft",
+    )
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    policy_item: Mapped["PolicyItem"] = relationship()

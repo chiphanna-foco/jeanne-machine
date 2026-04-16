@@ -299,12 +299,22 @@ async def _run_pipeline_task(days_back: int, batch_size: int):
     try:
         # ── Step 1: Ingest ──
         from adapters.congress import CongressAdapter
+        from adapters.courtlistener import CourtListenerAdapter
         from adapters.federal_register import FederalRegisterAdapter
-        from adapters.openstates import OpenStatesAdapter
+        from adapters.legistar import LegistarAdapter
+        from adapters.openstates import ALL_STATES, OpenStatesAdapter
         from enrichment.pipeline import enrich_document, ingest_raw_doc
 
         since = datetime.utcnow() - timedelta(days=days_back)
-        adapters = [OpenStatesAdapter(), CongressAdapter(), FederalRegisterAdapter()]
+        os_states = ALL_STATES if settings.openstates_scope == "all" else None
+        adapters = [
+            OpenStatesAdapter(states=os_states),
+            CongressAdapter(),
+            FederalRegisterAdapter(),
+            LegistarAdapter(),
+        ]
+        if settings.courtlistener_api_token:
+            adapters.append(CourtListenerAdapter())
 
         for adapter in adapters:
             try:
@@ -924,12 +934,22 @@ async def _run_weekly_full_task():
     try:
         # Step 1 + 2: ingest + enrich (reuse existing pipeline)
         from adapters.congress import CongressAdapter
+        from adapters.courtlistener import CourtListenerAdapter
         from adapters.federal_register import FederalRegisterAdapter
-        from adapters.openstates import OpenStatesAdapter
+        from adapters.legistar import LegistarAdapter
+        from adapters.openstates import ALL_STATES, OpenStatesAdapter
         from enrichment.pipeline import enrich_document, ingest_raw_doc
 
         since = datetime.utcnow() - timedelta(days=7)
-        adapters = [OpenStatesAdapter(), CongressAdapter(), FederalRegisterAdapter()]
+        os_states = ALL_STATES if settings.openstates_scope == "all" else None
+        adapters = [
+            OpenStatesAdapter(states=os_states),
+            CongressAdapter(),
+            FederalRegisterAdapter(),
+            LegistarAdapter(),
+        ]
+        if settings.courtlistener_api_token:
+            adapters.append(CourtListenerAdapter())
 
         for adapter in adapters:
             try:
@@ -1014,6 +1034,111 @@ async def _run_weekly_full_task():
     except Exception as e:
         results["errors"].append(f"weekly pipeline error: {str(e)[:300]}")
         logger.error(f"Weekly pipeline failed: {e}", exc_info=True)
+
+    _pipeline_status = {
+        "running": False,
+        "last_run": datetime.utcnow().isoformat(),
+        "last_result": results,
+    }
+
+
+# ── Content Drafts ─────────────────────────────────────────────────
+
+from storage.models import ContentDraft
+
+
+@app.get("/api/drafts")
+async def list_drafts(
+    status: str | None = None,
+    content_type: str | None = None,
+    limit: int = Query(default=50, le=200),
+    session: AsyncSession = Depends(get_session),
+):
+    """List content drafts with optional status/type filters."""
+    query = select(ContentDraft).order_by(ContentDraft.generated_at.desc())
+    if status:
+        query = query.where(ContentDraft.status == status)
+    if content_type:
+        query = query.where(ContentDraft.content_type == content_type)
+
+    result = await session.execute(query.limit(limit))
+    drafts = result.scalars().all()
+
+    return {
+        "drafts": [
+            {
+                "id": d.id,
+                "policy_item_id": d.policy_item_id,
+                "content_type": d.content_type,
+                "title": d.title,
+                "body": d.body,
+                "seo_description": d.seo_description,
+                "suggested_tags": d.suggested_tags,
+                "status": d.status,
+                "generated_at": d.generated_at.isoformat() if d.generated_at else None,
+            }
+            for d in drafts
+        ]
+    }
+
+
+@app.post("/api/drafts/{draft_id}/status")
+async def update_draft_status(
+    draft_id: int,
+    new_status: str = Query(...),
+    session: AsyncSession = Depends(get_session),
+):
+    """Update a draft's status (approve, reject, publish)."""
+    valid = {"draft", "approved", "rejected", "published"}
+    if new_status not in valid:
+        return JSONResponse(status_code=400, content={"error": f"status must be one of {valid}"})
+
+    draft = await session.get(ContentDraft, draft_id)
+    if not draft:
+        return JSONResponse(status_code=404, content={"error": "draft not found"})
+
+    draft.status = new_status
+    await session.commit()
+    return {"id": draft_id, "status": new_status}
+
+
+@app.get("/admin/generate-drafts")
+async def generate_drafts(
+    min_impact: str = Query(default="high"),
+    max_drafts: int = Query(default=5, le=20),
+    token: str | None = Query(default=None),
+):
+    """Generate blog post drafts from high-impact PolicyItems.
+
+    Usage: /admin/generate-drafts?min_impact=high&max_drafts=5
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    asyncio.create_task(_run_draft_generation(min_impact, max_drafts))
+    return {
+        "status": "started",
+        "message": f"Draft generation started (min_impact={min_impact}, max_drafts={max_drafts}).",
+    }
+
+
+async def _run_draft_generation(min_impact: str, max_drafts: int):
+    global _pipeline_status
+    _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
+
+    results = {"generated": 0, "errors": []}
+
+    try:
+        from enrichment.content_drafter import generate_drafts_for_high_impact
+
+        async with async_session() as session:
+            drafts = await generate_drafts_for_high_impact(
+                session, min_impact=min_impact, max_drafts=max_drafts
+            )
+            results["generated"] = len(drafts)
+            await session.commit()
+    except Exception as e:
+        results["errors"].append(f"draft gen error: {type(e).__name__}: {str(e)[:300]}")
 
     _pipeline_status = {
         "running": False,

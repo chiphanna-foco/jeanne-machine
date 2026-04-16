@@ -26,8 +26,13 @@ class Settings(BaseSettings):
     postmark_token: str = ""
 
     # Slack — set SLACK_WEBHOOK_URL to an incoming webhook URL for Slack digests
-    # https://api.slack.com/messaging/webhooks
     slack_webhook_url: str = ""
+
+    # CourtListener — free API token from courtlistener.com
+    courtlistener_api_token: str = ""
+
+    # Open States scope — "phase0" (OH + CO only) or "all" (all 50 states)
+    openstates_scope: str = "all"
 
     # Database — Railway sets DATABASE_URL; we normalize it for asyncpg
     database_url: str = "postgresql+asyncpg://tracker:tracker@localhost:5432/policy_tracker"

@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://v3.openstates.org"
 
-# Phase 0: only OH and CO
+# Phase 0: OH and CO. Phase 2: all 50 states + DC.
 PHASE0_STATES = ["oh", "co"]
+ALL_STATES = list(STATE_TO_JURISDICTION.keys())
 
 # Open States API v3 requires OCD jurisdiction IDs
 STATE_TO_JURISDICTION = {
