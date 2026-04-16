@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { AdminControls } from "./components/AdminControls";
 import { Filters } from "./components/Filters";
 import { Nav } from "./components/Nav";
 import { PolicyItemCard } from "./components/PolicyItemCard";
@@ -121,6 +122,8 @@ export default function Dashboard() {
           No policy items found. Run the ingestion and enrichment pipelines to populate data.
         </div>
       )}
+
+      <AdminControls />
     </div>
   );
 }

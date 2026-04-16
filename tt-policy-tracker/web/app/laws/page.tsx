@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { AdminControls } from "../components/AdminControls";
 import { Nav } from "../components/Nav";
 
 interface LawSnapshot {
@@ -346,6 +347,8 @@ export default function LawsPage() {
           </div>
         </div>
       )}
+
+      <AdminControls />
     </div>
   );
 }
