@@ -55,17 +55,19 @@ class FederalRegisterAdapter(BaseAdapter):
         ]
 
     async def fetch_new_items(self, since: datetime) -> list[RawDoc]:
-        """Fetch documents published since `since` that match our search criteria."""
+        """Fetch documents published since `since` from relevant agencies."""
         docs = []
         since_str = since.strftime("%m/%d/%Y")
 
-        for term in SEARCH_TERMS:
+        # Strategy: search by agency (precise) rather than keyword (noisy).
+        # Then do a narrow keyword search for terms unlikely to match unrelated agencies.
+        for agency in RELEVANT_AGENCIES:
             page = 1
             while True:
                 resp = await self.client.get(
                     f"{BASE_URL}/documents.json",
                     params={
-                        "conditions[term]": term,
+                        "conditions[agencies][]": agency,
                         "conditions[publication_date][gte]": since_str,
                         "conditions[type][]": [
                             "RULE",
@@ -100,11 +102,38 @@ class FederalRegisterAdapter(BaseAdapter):
                     if doc:
                         docs.append(doc)
 
-                # Pagination
                 total_pages = data.get("total_pages", 1)
-                if page >= total_pages or page >= 5:  # Cap pages per term
+                if page >= total_pages or page >= 3:
                     break
                 page += 1
+
+        # Also do targeted keyword searches but cap results heavily
+        targeted_terms = ["landlord tenant", "eviction moratorium", "rent control", "tenant screening"]
+        for term in targeted_terms:
+            resp = await self.client.get(
+                f"{BASE_URL}/documents.json",
+                params={
+                    "conditions[term]": term,
+                    "conditions[publication_date][gte]": since_str,
+                    "per_page": 10,
+                    "page": 1,
+                    "order": "newest",
+                    "fields[]": [
+                        "title",
+                        "abstract",
+                        "document_number",
+                        "html_url",
+                        "publication_date",
+                        "type",
+                        "agencies",
+                    ],
+                },
+            )
+            if resp.status_code == 200:
+                for item in resp.json().get("results", []):
+                    doc = self._normalize_item(item)
+                    if doc:
+                        docs.append(doc)
 
         # Deduplicate by external_id (same doc may match multiple search terms)
         seen = set()

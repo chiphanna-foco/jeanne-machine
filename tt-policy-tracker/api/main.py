@@ -464,3 +464,25 @@ async def db_stats(
         "unenriched_remaining": unenriched,
         "recent_raw_samples": samples,
     }
+
+
+@app.get("/admin/reset-raw")
+async def reset_raw_documents(
+    token: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Delete all raw documents and policy items to start fresh.
+
+    Usage: /admin/reset-raw?token=YOUR_TOKEN
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    from storage.models import DigestSend
+
+    await session.execute(text("DELETE FROM digest_send"))
+    await session.execute(text("DELETE FROM policy_item"))
+    await session.execute(text("DELETE FROM raw_document"))
+    await session.commit()
+
+    return {"status": "ok", "message": "All raw documents and policy items deleted. Run the pipeline again to re-ingest."}
