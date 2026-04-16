@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from storage.database import async_session, get_session
-from storage.models import Base, Jurisdiction, PolicyItem, RawDocument, Subscription
+from storage.models import Base, Jurisdiction, LawSnapshot, PolicyItem, RawDocument, Subscription
 
 logger = logging.getLogger(__name__)
 
@@ -707,6 +707,313 @@ async def _run_digest_task(frequency: str):
 
     except Exception as e:
         results["errors"].append(f"digest error: {str(e)[:300]}")
+
+    _pipeline_status = {
+        "running": False,
+        "last_run": datetime.utcnow().isoformat(),
+        "last_result": results,
+    }
+
+
+# ── Law Snapshots ──────────────────────────────────────────────────
+
+
+@app.get("/api/laws")
+async def list_laws(
+    jurisdiction_id: int | None = None,
+    state: str | None = None,
+    topic: str | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    """Browse current law snapshots by jurisdiction and/or topic."""
+    query = select(LawSnapshot).order_by(LawSnapshot.jurisdiction_id, LawSnapshot.topic)
+
+    if jurisdiction_id:
+        query = query.where(LawSnapshot.jurisdiction_id == jurisdiction_id)
+    if topic:
+        query = query.where(LawSnapshot.topic == topic)
+    if state:
+        query = query.join(Jurisdiction).where(Jurisdiction.state_code == state.upper())
+
+    result = await session.execute(query)
+    snapshots = result.scalars().all()
+
+    return {
+        "snapshots": [
+            {
+                "id": s.id,
+                "jurisdiction_id": s.jurisdiction_id,
+                "topic": s.topic,
+                "headline": s.headline,
+                "summary": s.summary,
+                "key_facts": s.key_facts,
+                "statutory_references": s.statutory_references,
+                "source_item_ids": s.source_item_ids,
+                "confidence": s.confidence,
+                "caveats": s.caveats,
+                "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+            }
+            for s in snapshots
+        ]
+    }
+
+
+@app.get("/api/laws/matrix")
+async def laws_matrix(session: AsyncSession = Depends(get_session)):
+    """Return a matrix of (jurisdiction × topic) with coverage indicators.
+
+    Used by the dashboard to render a heatmap of which
+    jurisdiction+topic pairs have synthesized laws, and how confident.
+    """
+    from enrichment.law_synthesizer import TOPICS, TOPIC_LABELS
+
+    # Get all jurisdictions that have any policy items
+    jur_q = (
+        select(Jurisdiction)
+        .join(PolicyItem, PolicyItem.jurisdiction_id == Jurisdiction.id)
+        .distinct()
+        .order_by(Jurisdiction.level, Jurisdiction.name)
+    )
+    jur_result = await session.execute(jur_q)
+    jurisdictions = list(jur_result.scalars().all())
+
+    # Get all snapshots
+    snapshot_result = await session.execute(select(LawSnapshot))
+    snapshots = list(snapshot_result.scalars().all())
+    by_key = {(s.jurisdiction_id, s.topic): s for s in snapshots}
+
+    matrix = []
+    for jur in jurisdictions:
+        row = {
+            "jurisdiction_id": jur.id,
+            "jurisdiction_name": jur.name,
+            "jurisdiction_level": jur.level,
+            "state_code": jur.state_code,
+            "topics": {},
+        }
+        for topic in TOPICS:
+            snap = by_key.get((jur.id, topic))
+            if snap:
+                row["topics"][topic] = {
+                    "confidence": snap.confidence,
+                    "headline": snap.headline,
+                    "snapshot_id": snap.id,
+                }
+            else:
+                row["topics"][topic] = None
+        matrix.append(row)
+
+    return {
+        "topics": TOPICS,
+        "topic_labels": TOPIC_LABELS,
+        "jurisdictions": matrix,
+    }
+
+
+# ── Admin: Refresh Law Snapshots ──────────────────────────────────
+
+
+@app.get("/admin/refresh-laws")
+async def refresh_laws(
+    min_items: int = Query(default=1, ge=1),
+    max_pairs: int = Query(default=50, le=500),
+    token: str | None = Query(default=None),
+):
+    """Refresh law snapshots by synthesizing them from current PolicyItems.
+
+    Usage: /admin/refresh-laws?min_items=1&max_pairs=50&token=YOUR_TOKEN
+
+    - min_items: only synthesize for (jurisdiction, topic) pairs with at least N items
+    - max_pairs: cap on how many snapshots to refresh in this run (each costs ~$0.01)
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    asyncio.create_task(_run_refresh_laws_task(min_items, max_pairs))
+    return {
+        "status": "started",
+        "message": f"Law snapshot refresh started (min_items={min_items}, max_pairs={max_pairs}).",
+    }
+
+
+async def _run_refresh_laws_task(min_items: int, max_pairs: int):
+    """Background task: regenerate law snapshots from current PolicyItems."""
+    global _pipeline_status
+    _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
+
+    results = {"synthesized": 0, "skipped": 0, "errors": []}
+
+    try:
+        from enrichment.law_synthesizer import (
+            find_jurisdiction_topic_pairs_with_items,
+            synthesize_law_snapshot,
+        )
+
+        async with async_session() as session:
+            pairs = await find_jurisdiction_topic_pairs_with_items(session, min_items=min_items)
+
+        logger.info(f"Found {len(pairs)} (jurisdiction, topic) pairs to synthesize")
+
+        # Process each in its own session so one failure doesn't block others
+        for jur_id, topic, items in pairs[:max_pairs]:
+            try:
+                async with async_session() as session:
+                    snapshot = await synthesize_law_snapshot(session, jur_id, topic, items)
+                    if snapshot:
+                        results["synthesized"] += 1
+                    else:
+                        results["skipped"] += 1
+                    await session.commit()
+            except Exception as e:
+                err = f"synthesize jur={jur_id} topic={topic}: {type(e).__name__}: {str(e)[:200]}"
+                logger.error(err)
+                results["errors"].append(err)
+
+    except Exception as e:
+        results["errors"].append(f"refresh-laws error: {type(e).__name__}: {str(e)[:300]}")
+        logger.error(f"Law refresh failed: {e}", exc_info=True)
+
+    _pipeline_status = {
+        "running": False,
+        "last_run": datetime.utcnow().isoformat(),
+        "last_result": results,
+    }
+
+
+# ── Weekly Full Pipeline (Friday EOD Cron) ────────────────────────
+
+
+@app.get("/admin/cron-weekly-full")
+async def cron_weekly_full(token: str | None = Query(default=None)):
+    """One-shot weekly pipeline: ingest + enrich + refresh laws + Slack digest.
+
+    Designed to be hit once a week (Friday evening UTC recommended):
+      cron: 0 23 * * 5  (23:00 UTC = 5pm MT)
+
+    Full sequence:
+      1. Ingest last 7 days from all adapters
+      2. Enrich up to 100 new raw documents
+      3. Refresh law snapshots for any jurisdiction+topic pairs with activity
+      4. Send Slack digest of new items (if SLACK_WEBHOOK_URL set)
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    asyncio.create_task(_run_weekly_full_task())
+    return {
+        "status": "started",
+        "message": "Weekly full pipeline started: ingest → enrich → refresh laws → Slack.",
+    }
+
+
+async def _run_weekly_full_task():
+    """Background task: complete end-to-end weekly run."""
+    global _pipeline_status
+    _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
+
+    results = {
+        "ingested": 0,
+        "enriched": 0,
+        "irrelevant": 0,
+        "laws_synthesized": 0,
+        "slack_sent": False,
+        "slack_item_count": 0,
+        "errors": [],
+    }
+
+    try:
+        # Step 1 + 2: ingest + enrich (reuse existing pipeline)
+        from adapters.congress import CongressAdapter
+        from adapters.federal_register import FederalRegisterAdapter
+        from adapters.openstates import OpenStatesAdapter
+        from enrichment.pipeline import enrich_document, ingest_raw_doc
+
+        since = datetime.utcnow() - timedelta(days=7)
+        adapters = [OpenStatesAdapter(), CongressAdapter(), FederalRegisterAdapter()]
+
+        for adapter in adapters:
+            try:
+                docs = await adapter.fetch_new_items(since)
+                async with async_session() as session:
+                    for doc in docs:
+                        raw = await ingest_raw_doc(session, doc)
+                        if raw:
+                            results["ingested"] += 1
+                    await session.commit()
+            except Exception as e:
+                results["errors"].append(f"{adapter.source_name}: {str(e)[:300]}")
+
+        # Enrich the new docs (per-item commit)
+        async with async_session() as session:
+            subquery = select(PolicyItem.raw_document_id)
+            query = (
+                select(RawDocument.id)
+                .where(RawDocument.id.notin_(subquery))
+                .order_by(RawDocument.fetched_at.desc())
+                .limit(100)
+            )
+            result = await session.execute(query)
+            raw_ids = list(result.scalars().all())
+
+        for raw_id in raw_ids:
+            try:
+                async with async_session() as session:
+                    raw = await session.get(RawDocument, raw_id)
+                    if not raw:
+                        continue
+                    item = await enrich_document(session, raw)
+                    if item:
+                        results["enriched"] += 1
+                    else:
+                        results["irrelevant"] += 1
+                    await session.commit()
+            except Exception as e:
+                results["errors"].append(f"enrich {raw_id}: {str(e)[:200]}")
+
+        # Step 3: refresh law snapshots for pairs with new activity
+        try:
+            from enrichment.law_synthesizer import (
+                find_jurisdiction_topic_pairs_with_items,
+                synthesize_law_snapshot,
+            )
+
+            async with async_session() as session:
+                pairs = await find_jurisdiction_topic_pairs_with_items(session, min_items=1)
+
+            for jur_id, topic, items in pairs[:50]:
+                try:
+                    async with async_session() as session:
+                        snap = await synthesize_law_snapshot(session, jur_id, topic, items)
+                        if snap:
+                            results["laws_synthesized"] += 1
+                        await session.commit()
+                except Exception as e:
+                    results["errors"].append(f"synth {jur_id}/{topic}: {str(e)[:150]}")
+        except Exception as e:
+            results["errors"].append(f"law synth stage: {str(e)[:300]}")
+
+        # Step 4: Slack digest
+        if settings.slack_webhook_url:
+            try:
+                from digest.slack import build_slack_digest, send_to_slack
+
+                async with async_session() as session:
+                    blocks, item_ids = await build_slack_digest(
+                        session, subscription=None, lookback=timedelta(days=7)
+                    )
+                    results["slack_item_count"] = len(item_ids)
+                    ok = await send_to_slack(
+                        settings.slack_webhook_url,
+                        blocks,
+                        fallback_text=f"TT Policy Tracker weekly digest ({len(item_ids)} items)",
+                    )
+                    results["slack_sent"] = ok
+            except Exception as e:
+                results["errors"].append(f"slack stage: {str(e)[:300]}")
+
+    except Exception as e:
+        results["errors"].append(f"weekly pipeline error: {str(e)[:300]}")
+        logger.error(f"Weekly pipeline failed: {e}", exc_info=True)
 
     _pipeline_status = {
         "running": False,

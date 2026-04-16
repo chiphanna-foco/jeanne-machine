@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Filters } from "./components/Filters";
+import { Nav } from "./components/Nav";
 import { PolicyItemCard } from "./components/PolicyItemCard";
 import { StatsBar } from "./components/StatsBar";
 
@@ -68,7 +69,7 @@ export default function Dashboard() {
 
   return (
     <div style={{ maxWidth: 960, margin: "0 auto", padding: "24px 16px" }}>
-      <header style={{ marginBottom: 24 }}>
+      <header style={{ marginBottom: 16 }}>
         <h1 style={{ fontSize: 24, fontWeight: 700, color: "#1a56db", margin: 0 }}>
           TT Policy Tracker
         </h1>
@@ -76,6 +77,8 @@ export default function Dashboard() {
           Internal legislative monitoring dashboard
         </p>
       </header>
+
+      <Nav />
 
       <StatsBar />
 

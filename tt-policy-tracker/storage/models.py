@@ -130,3 +130,53 @@ class DigestSend(Base):
     message_id: Mapped[str | None] = mapped_column(Text)
 
     subscription: Mapped["Subscription"] = relationship()
+
+
+class LawSnapshot(Base):
+    """Per-jurisdiction, per-topic summary of the current state of law.
+
+    Built by synthesizing all relevant PolicyItems for a (jurisdiction, topic)
+    pair using AI. Refreshed weekly when new policy activity is detected.
+    """
+
+    __tablename__ = "law_snapshot"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    jurisdiction_id: Mapped[int] = mapped_column(
+        ForeignKey("jurisdiction.id"), nullable=False
+    )
+    topic: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # AI-synthesized narrative describing the current state of law
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Short headline for the topic (e.g. "Security deposits capped at 1 month's rent")
+    headline: Mapped[str | None] = mapped_column(Text)
+
+    # Key facts as structured list (bullets)
+    key_facts: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+
+    # Statutory/regulatory references mentioned in source items
+    statutory_references: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+
+    # The policy_item ids that fed into this synthesis
+    source_item_ids: Mapped[list[int] | None] = mapped_column(ARRAY(Integer))
+
+    # How confident the AI is that this accurately reflects current law
+    # ("high" = multiple sources agree, "med" = single strong source,
+    #  "low" = limited or conflicting information)
+    confidence: Mapped[str] = mapped_column(
+        Enum("low", "med", "high", name="law_confidence"), default="med"
+    )
+
+    # Warning text (e.g. "Based on recent activity only; does not reflect full statutory history")
+    caveats: Mapped[str | None] = mapped_column(Text)
+
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    jurisdiction: Mapped["Jurisdiction"] = relationship()
