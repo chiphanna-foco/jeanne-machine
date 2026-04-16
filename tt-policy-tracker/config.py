@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     postmark_token: str = ""
 
+    # Slack — set SLACK_WEBHOOK_URL to an incoming webhook URL for Slack digests
+    # https://api.slack.com/messaging/webhooks
+    slack_webhook_url: str = ""
+
     # Database — Railway sets DATABASE_URL; we normalize it for asyncpg
     database_url: str = "postgresql+asyncpg://tracker:tracker@localhost:5432/policy_tracker"
 

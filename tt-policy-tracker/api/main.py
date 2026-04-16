@@ -530,6 +530,94 @@ async def cron_weekly_digest(token: str | None = Query(default=None)):
     return {"status": "started", "message": "Weekly digest task started."}
 
 
+# ── Admin: Slack Digest ────────────────────────────────────────────
+
+
+@app.get("/admin/send-slack-digest")
+async def send_slack_digest(
+    frequency: str = Query(default="weekly"),
+    days_back: int = Query(default=0, ge=0, le=90),
+    token: str | None = Query(default=None),
+):
+    """Send a digest to the configured Slack webhook.
+
+    Usage: /admin/send-slack-digest?frequency=weekly&token=YOUR_TOKEN
+
+    - frequency: daily|weekly — controls default lookback window
+    - days_back: override lookback (e.g. days_back=30 for first send)
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    if not settings.slack_webhook_url:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "SLACK_WEBHOOK_URL not configured. Set it on Railway and redeploy."},
+        )
+
+    asyncio.create_task(_run_slack_digest_task(frequency, days_back))
+    return {
+        "status": "started",
+        "message": f"Slack digest ({frequency}) task started. Check /admin/pipeline-status for results.",
+    }
+
+
+@app.get("/admin/cron-weekly-slack")
+async def cron_weekly_slack(token: str | None = Query(default=None)):
+    """Cron endpoint for weekly Slack digest."""
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+    if not settings.slack_webhook_url:
+        return JSONResponse(status_code=400, content={"error": "SLACK_WEBHOOK_URL not configured"})
+    asyncio.create_task(_run_slack_digest_task("weekly", 0))
+    return {"status": "started", "message": "Weekly Slack digest task started."}
+
+
+@app.get("/admin/cron-daily-slack")
+async def cron_daily_slack(token: str | None = Query(default=None)):
+    """Cron endpoint for daily Slack digest."""
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+    if not settings.slack_webhook_url:
+        return JSONResponse(status_code=400, content={"error": "SLACK_WEBHOOK_URL not configured"})
+    asyncio.create_task(_run_slack_digest_task("daily", 0))
+    return {"status": "started", "message": "Daily Slack digest task started."}
+
+
+async def _run_slack_digest_task(frequency: str, days_back: int):
+    """Background task: build and send a digest to Slack."""
+    global _pipeline_status
+    _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
+
+    results = {"sent": False, "item_count": 0, "errors": []}
+
+    try:
+        from digest.slack import build_slack_digest, send_to_slack
+
+        async with async_session() as session:
+            lookback = timedelta(days=days_back) if days_back > 0 else None
+            blocks, item_ids = await build_slack_digest(session, subscription=None, lookback=lookback)
+
+            results["item_count"] = len(item_ids)
+
+            fallback_text = f"TT Policy Tracker {frequency} digest — {len(item_ids)} items"
+            ok = await send_to_slack(settings.slack_webhook_url, blocks, fallback_text=fallback_text)
+            results["sent"] = ok
+
+            if not ok:
+                results["errors"].append("Slack webhook returned non-200 or non-'ok'")
+
+    except Exception as e:
+        results["errors"].append(f"slack digest error: {type(e).__name__}: {str(e)[:300]}")
+        logger.error(f"Slack digest failed: {e}", exc_info=True)
+
+    _pipeline_status = {
+        "running": False,
+        "last_run": datetime.utcnow().isoformat(),
+        "last_result": results,
+    }
+
+
 # ── Admin: Digest ──────────────────────────────────────────────────
 
 
