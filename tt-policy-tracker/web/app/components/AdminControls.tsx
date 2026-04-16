@@ -56,6 +56,8 @@ const ACTIONS: Action[] = [
   },
 ];
 
+const TOKEN_STORAGE_KEY = "tt_admin_token";
+
 function formatTimestamp(iso: string | null): string {
   if (!iso) return "never";
   try {
@@ -66,15 +68,52 @@ function formatTimestamp(iso: string | null): string {
   }
 }
 
+function appendToken(path: string, token: string): string {
+  if (!token) return path;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}token=${encodeURIComponent(token)}`;
+}
+
 export function AdminControls() {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<PipelineStatus | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [token, setToken] = useState("");
+  const [tokenInput, setTokenInput] = useState("");
+  const [editingToken, setEditingToken] = useState(false);
+
+  // Load token from localStorage on mount
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const saved = window.localStorage.getItem(TOKEN_STORAGE_KEY) || "";
+      setToken(saved);
+      if (!saved) setEditingToken(true);
+    }
+  }, []);
+
+  const saveToken = () => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(TOKEN_STORAGE_KEY, tokenInput);
+    }
+    setToken(tokenInput);
+    setTokenInput("");
+    setEditingToken(false);
+    setMessage("Token saved. Stored locally in your browser only.");
+  };
+
+  const clearToken = () => {
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+    }
+    setToken("");
+    setTokenInput("");
+    setEditingToken(true);
+  };
 
   const fetchStatus = async () => {
     try {
-      const resp = await fetch("/admin/pipeline-status");
+      const resp = await fetch(appendToken("/admin/pipeline-status", token));
       if (resp.ok) {
         const data = await resp.json();
         setStatus(data);
@@ -85,21 +124,25 @@ export function AdminControls() {
   };
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !token) return;
     fetchStatus();
     const interval = setInterval(fetchStatus, 4000);
     return () => clearInterval(interval);
-  }, [open]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, token]);
 
   const trigger = async (action: Action) => {
     if (action.confirmText && !confirm(action.confirmText)) return;
     setBusy(true);
     setMessage(null);
     try {
-      const resp = await fetch(action.path);
+      const resp = await fetch(appendToken(action.path, token));
       const data = await resp.json();
       if (resp.ok) {
         setMessage(`${action.label}: ${data.message || "Started"}`);
+      } else if (resp.status === 403) {
+        setMessage(`Token rejected by server. Update or clear it below.`);
+        setEditingToken(true);
       } else {
         setMessage(`${action.label} failed: ${data.error || resp.statusText}`);
       }
@@ -138,6 +181,7 @@ export function AdminControls() {
 
   const running = status?.running;
   const lastResult = status?.last_result;
+  const needsToken = !token;
 
   return (
     <div
@@ -172,6 +216,112 @@ export function AdminControls() {
           ×
         </button>
       </div>
+
+      {/* Token management */}
+      {(needsToken || editingToken) && (
+        <div
+          style={{
+            background: needsToken ? "#fef3c7" : "#f3f4f6",
+            border: `1px solid ${needsToken ? "#fde68a" : "#e5e7eb"}`,
+            borderRadius: 6,
+            padding: "10px 12px",
+            marginBottom: 12,
+          }}
+        >
+          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, color: "#374151" }}>
+            {needsToken ? "Admin token required" : "Update token"}
+          </div>
+          <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8, lineHeight: 1.4 }}>
+            Paste your ADMIN_TOKEN to enable admin actions. Stored locally in your browser only.
+          </div>
+          <input
+            type="password"
+            value={tokenInput}
+            onChange={(e) => setTokenInput(e.target.value)}
+            placeholder="ADMIN_TOKEN"
+            style={{
+              width: "100%",
+              padding: "6px 8px",
+              fontSize: 12,
+              fontFamily: "monospace",
+              border: "1px solid #d1d5db",
+              borderRadius: 4,
+              boxSizing: "border-box",
+            }}
+          />
+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            <button
+              onClick={saveToken}
+              disabled={!tokenInput}
+              style={{
+                padding: "5px 10px",
+                fontSize: 11,
+                fontWeight: 600,
+                background: tokenInput ? "#1a56db" : "#d1d5db",
+                color: "#fff",
+                border: "none",
+                borderRadius: 4,
+                cursor: tokenInput ? "pointer" : "not-allowed",
+              }}
+            >
+              Save
+            </button>
+            {!needsToken && (
+              <button
+                onClick={() => {
+                  setEditingToken(false);
+                  setTokenInput("");
+                }}
+                style={{
+                  padding: "5px 10px",
+                  fontSize: 11,
+                  background: "transparent",
+                  color: "#6b7280",
+                  border: "1px solid #d1d5db",
+                  borderRadius: 4,
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {!needsToken && !editingToken && (
+        <div style={{ fontSize: 10, color: "#9ca3af", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>🔒 Authenticated</span>
+          <button
+            onClick={() => setEditingToken(true)}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "#6b7280",
+              fontSize: 10,
+              cursor: "pointer",
+              textDecoration: "underline",
+              padding: 0,
+            }}
+          >
+            Change token
+          </button>
+          <button
+            onClick={clearToken}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "#dc2626",
+              fontSize: 10,
+              cursor: "pointer",
+              textDecoration: "underline",
+              padding: 0,
+            }}
+          >
+            Clear
+          </button>
+        </div>
+      )}
 
       <div
         style={{
@@ -225,15 +375,15 @@ export function AdminControls() {
           <button
             key={action.key}
             onClick={() => trigger(action)}
-            disabled={busy || running}
+            disabled={busy || running || needsToken}
             style={{
               textAlign: "left",
               padding: "10px 12px",
               background: "#f9fafb",
               border: "1px solid #e5e7eb",
               borderRadius: 8,
-              cursor: busy || running ? "not-allowed" : "pointer",
-              opacity: busy || running ? 0.5 : 1,
+              cursor: busy || running || needsToken ? "not-allowed" : "pointer",
+              opacity: busy || running || needsToken ? 0.5 : 1,
             }}
           >
             <div style={{ fontSize: 13, fontWeight: 600, color: "#1f2937" }}>{action.label}</div>
