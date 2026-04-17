@@ -18,7 +18,6 @@ BASE_URL = "https://v3.openstates.org"
 
 # Phase 0: OH and CO. Phase 2: all 50 states + DC.
 PHASE0_STATES = ["oh", "co"]
-ALL_STATES = list(STATE_TO_JURISDICTION.keys())
 
 # Open States API v3 requires OCD jurisdiction IDs
 STATE_TO_JURISDICTION = {
@@ -74,6 +73,8 @@ STATE_TO_JURISDICTION = {
     "wy": "ocd-jurisdiction/country:us/state:wy/government",
     "dc": "ocd-jurisdiction/country:us/district:dc/government",
 }
+
+ALL_STATES = list(STATE_TO_JURISDICTION.keys())
 
 # Topics we consider relevant for pre-filtering via Open States subject tags
 RELEVANT_SUBJECTS = {
