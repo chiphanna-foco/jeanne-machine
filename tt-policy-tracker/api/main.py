@@ -58,6 +58,21 @@ async def health():
     return {"status": "ok", "service": "tt-policy-tracker"}
 
 
+# ── Auth verification ──────────────────────────────────────────────
+
+
+@app.get("/api/auth/verify")
+async def verify_auth(token: str | None = None):
+    """Verify a password/token matches ADMIN_TOKEN.
+
+    If no ADMIN_TOKEN is configured on the server, anything passes (dev mode).
+    Returns: {"valid": true/false, "auth_required": true/false}
+    """
+    if not settings.admin_token:
+        return {"valid": True, "auth_required": False}
+    return {"valid": token == settings.admin_token, "auth_required": True}
+
+
 # ── Policy Items ────────────────────────────────────────────────────
 
 

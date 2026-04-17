@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { getStoredPassword } from "./PasswordGate";
 
 interface PipelineStatus {
   running: boolean;
@@ -63,8 +64,6 @@ const ACTIONS: Action[] = [
   },
 ];
 
-const TOKEN_STORAGE_KEY = "jm_admin_token";
-
 function formatTimestamp(iso: string | null): string {
   if (!iso) return "never";
   try {
@@ -90,40 +89,10 @@ export function AdminControls() {
   const [status, setStatus] = useState<PipelineStatus | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [token, setToken] = useState("");
-  const [tokenInput, setTokenInput] = useState("");
-  const [editingToken, setEditingToken] = useState(false);
-
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      const saved = window.localStorage.getItem(TOKEN_STORAGE_KEY) || "";
-      setToken(saved);
-      if (!saved) setEditingToken(true);
-    }
-  }, []);
-
-  const saveToken = () => {
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(TOKEN_STORAGE_KEY, tokenInput);
-    }
-    setToken(tokenInput);
-    setTokenInput("");
-    setEditingToken(false);
-    setMessage("Token saved. Stored locally in your browser.");
-  };
-
-  const clearToken = () => {
-    if (typeof window !== "undefined") {
-      window.localStorage.removeItem(TOKEN_STORAGE_KEY);
-    }
-    setToken("");
-    setTokenInput("");
-    setEditingToken(true);
-  };
 
   const fetchStatus = async () => {
     try {
-      const resp = await fetch(appendToken("/admin/pipeline-status", token));
+      const resp = await fetch(appendToken("/admin/pipeline-status", getStoredPassword()));
       if (resp.ok) {
         const data = await resp.json();
         setStatus(data);
@@ -134,25 +103,23 @@ export function AdminControls() {
   };
 
   useEffect(() => {
-    if (!open || !token) return;
+    if (!open) return;
     fetchStatus();
     const interval = setInterval(fetchStatus, 4000);
     return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, token]);
+  }, [open]);
 
   const trigger = async (action: Action) => {
     if (action.confirmText && !confirm(action.confirmText)) return;
     setBusy(true);
     setMessage(null);
     try {
-      const resp = await fetch(appendToken(action.path, token));
+      const resp = await fetch(appendToken(action.path, getStoredPassword()));
       const data = await resp.json();
       if (resp.ok) {
         setMessage(`${action.label}: ${data.message || "Started"}`);
       } else if (resp.status === 403) {
-        setMessage(`Token rejected. Update or clear it below.`);
-        setEditingToken(true);
+        setMessage(`Auth rejected. Reload the page and re-enter the password.`);
       } else {
         setMessage(`${action.label} failed: ${data.error || resp.statusText}`);
       }
@@ -198,7 +165,6 @@ export function AdminControls() {
 
   const running = status?.running;
   const lastResult = status?.last_result;
-  const needsToken = !token;
 
   return (
     <div
@@ -253,109 +219,6 @@ export function AdminControls() {
           ×
         </button>
       </div>
-
-      {/* Token management */}
-      {(needsToken || editingToken) && (
-        <div
-          style={{
-            background: needsToken ? "#fef3c7" : "#f9fafb",
-            border: `1px solid ${needsToken ? "#fde68a" : "var(--color-border)"}`,
-            borderRadius: 10,
-            padding: "12px 14px",
-            marginBottom: 14,
-          }}
-        >
-          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4, color: "#374151" }}>
-            {needsToken ? "🔒 Admin token required" : "Update token"}
-          </div>
-          <div style={{ fontSize: 11, color: "var(--color-text-muted)", marginBottom: 10, lineHeight: 1.4 }}>
-            Paste your ADMIN_TOKEN. Stored locally in your browser only.
-          </div>
-          <input
-            type="password"
-            value={tokenInput}
-            onChange={(e) => setTokenInput(e.target.value)}
-            placeholder="ADMIN_TOKEN"
-            style={{
-              width: "100%",
-              padding: "8px 10px",
-              fontSize: 12,
-              fontFamily: "var(--font-mono)",
-              border: "1px solid var(--color-border-strong)",
-              borderRadius: 6,
-              boxSizing: "border-box",
-              background: "#fff",
-            }}
-          />
-          <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
-            <button
-              onClick={saveToken}
-              disabled={!tokenInput}
-              style={{
-                padding: "6px 14px",
-                fontSize: 12,
-                fontWeight: 600,
-                background: tokenInput ? "var(--color-primary)" : "#d1d5db",
-                color: "#fff",
-                border: "none",
-                borderRadius: 6,
-                cursor: tokenInput ? "pointer" : "not-allowed",
-              }}
-            >
-              Save
-            </button>
-            {!needsToken && (
-              <button
-                onClick={() => {
-                  setEditingToken(false);
-                  setTokenInput("");
-                }}
-                style={{
-                  padding: "6px 12px",
-                  fontSize: 12,
-                  background: "transparent",
-                  color: "var(--color-text-muted)",
-                  border: "1px solid var(--color-border-strong)",
-                  borderRadius: 6,
-                  cursor: "pointer",
-                }}
-              >
-                Cancel
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
-      {!needsToken && !editingToken && (
-        <div
-          style={{
-            fontSize: 11,
-            color: "var(--color-text-subtle)",
-            marginBottom: 12,
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-          }}
-        >
-          <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--color-success)", fontWeight: 600 }}>
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--color-success)", display: "inline-block" }} />
-            Authenticated
-          </span>
-          <button
-            onClick={() => setEditingToken(true)}
-            style={{ background: "transparent", border: "none", color: "var(--color-text-muted)", fontSize: 11, cursor: "pointer", textDecoration: "underline", padding: 0 }}
-          >
-            change
-          </button>
-          <button
-            onClick={clearToken}
-            style={{ background: "transparent", border: "none", color: "var(--color-danger)", fontSize: 11, cursor: "pointer", textDecoration: "underline", padding: 0 }}
-          >
-            clear
-          </button>
-        </div>
-      )}
 
       {/* Status card */}
       <div
@@ -438,22 +301,22 @@ export function AdminControls() {
           <button
             key={action.key}
             onClick={() => trigger(action)}
-            disabled={busy || running || needsToken}
+            disabled={busy || running}
             style={{
               textAlign: "left",
               padding: "10px 12px",
               background: "#fff",
               border: "1px solid var(--color-border)",
               borderRadius: 10,
-              cursor: busy || running || needsToken ? "not-allowed" : "pointer",
-              opacity: busy || running || needsToken ? 0.4 : 1,
+              cursor: busy || running ? "not-allowed" : "pointer",
+              opacity: busy || running ? 0.4 : 1,
               display: "flex",
               alignItems: "center",
               gap: 10,
               transition: "background 160ms ease, border-color 160ms ease",
             }}
             onMouseEnter={(e) => {
-              if (busy || running || needsToken) return;
+              if (busy || running) return;
               e.currentTarget.style.background = "#f8fafc";
               e.currentTarget.style.borderColor = "var(--color-primary)";
             }}
