@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { AdminControls } from "../components/AdminControls";
+import { Header } from "../components/Header";
 import { Nav } from "../components/Nav";
 
 interface LawSnapshot {
@@ -32,16 +33,10 @@ interface MatrixResponse {
   jurisdictions: MatrixJurisdiction[];
 }
 
-const CONFIDENCE_COLOR: Record<string, string> = {
-  high: "#059669",
-  med: "#f59e0b",
-  low: "#dc2626",
-};
-
-const CONFIDENCE_BG: Record<string, string> = {
-  high: "#d1fae5",
-  med: "#fef3c7",
-  low: "#fee2e2",
+const CONFIDENCE: Record<string, { color: string; bg: string; label: string }> = {
+  high: { color: "#059669", bg: "#d1fae5", label: "HIGH" },
+  med: { color: "#d97706", bg: "#fef3c7", label: "MED" },
+  low: { color: "#dc2626", bg: "#fee2e2", label: "LOW" },
 };
 
 export default function LawsPage() {
@@ -83,70 +78,94 @@ export default function LawsPage() {
   }, [matrix]);
 
   return (
-    <div style={{ maxWidth: 1200, margin: "0 auto", padding: "24px 16px" }}>
-      <header style={{ marginBottom: 16 }}>
-        <h1 style={{ fontSize: 24, fontWeight: 700, color: "#1a56db", margin: 0 }}>
-          TT Policy Tracker
-        </h1>
-        <p style={{ color: "#6b7280", fontSize: 14, margin: "4px 0 0 0" }}>
-          Current state of law by jurisdiction and topic
-        </p>
-      </header>
+    <div>
+      <Header subtitle="Current law repository by jurisdiction and topic" />
 
-      <Nav />
-
-      {loading && <div style={{ padding: 24, color: "#6b7280" }}>Loading...</div>}
-
-      {error && (
+      <main
+        className="page-fade-in"
+        style={{
+          maxWidth: 1200,
+          margin: "0 auto",
+          padding: "0 24px 48px",
+          position: "relative",
+          zIndex: 2,
+        }}
+      >
         <div
+          className="card"
           style={{
-            background: "#fef2f2",
-            border: "1px solid #fecaca",
-            borderRadius: 8,
-            padding: "12px 16px",
-            color: "#991b1b",
-            fontSize: 13,
+            padding: "20px 24px",
+            marginBottom: 20,
+            boxShadow: "var(--shadow-lg)",
           }}
         >
-          {error}
+          <Nav />
+
+          <div style={{ marginBottom: 4 }}>
+            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Current Laws Matrix</h2>
+            <p style={{ margin: "4px 0 0", fontSize: 13, color: "var(--color-text-muted)", lineHeight: 1.5 }}>
+              AI-synthesized summaries of current law by jurisdiction and topic.
+              Color indicates data confidence.
+              <ConfidenceDot color={CONFIDENCE.high.color} label="high" />
+              <ConfidenceDot color={CONFIDENCE.med.color} label="med" />
+              <ConfidenceDot color={CONFIDENCE.low.color} label="low" />
+              {" "}Click any cell for details.
+            </p>
+          </div>
         </div>
-      )}
 
-      {!loading && matrix && matrix.jurisdictions.length === 0 && (
-        <div
-          style={{
-            textAlign: "center",
-            padding: 48,
-            color: "#9ca3af",
-          }}
-        >
-          No law snapshots yet. Run <code>/admin/refresh-laws</code> after the pipeline has enriched some items.
-        </div>
-      )}
+        {loading && (
+          <div className="card" style={{ padding: 48, textAlign: "center", color: "var(--color-text-subtle)" }}>
+            Loading law repository...
+          </div>
+        )}
 
-      {!loading && matrix && matrix.jurisdictions.length > 0 && (
-        <div>
-          <p style={{ fontSize: 13, color: "#6b7280", marginBottom: 12 }}>
-            AI-synthesized summaries of current law based on observed policy activity.
-            Confidence color indicates how certain we are: <span style={{ color: "#059669" }}>green</span> = high,
-            {" "}<span style={{ color: "#f59e0b" }}>yellow</span> = medium,
-            {" "}<span style={{ color: "#dc2626" }}>red</span> = low.
-            Click a cell to see details.
-          </p>
+        {error && (
+          <div
+            className="card"
+            style={{
+              background: "#fef2f2",
+              borderColor: "#fecaca",
+              padding: "14px 18px",
+              color: "#991b1b",
+              fontSize: 13,
+            }}
+          >
+            {error}
+          </div>
+        )}
 
-          <div style={{ overflowX: "auto", background: "#fff", borderRadius: 8, boxShadow: "0 1px 3px rgba(0,0,0,0.06)" }}>
+        {!loading && matrix && matrix.jurisdictions.length === 0 && (
+          <div className="card" style={{ textAlign: "center", padding: 48, color: "var(--color-text-subtle)" }}>
+            <div style={{ fontSize: 36, marginBottom: 8 }}>📚</div>
+            <div style={{ fontSize: 15, color: "var(--color-text)", fontWeight: 600, marginBottom: 4 }}>
+              No law snapshots yet
+            </div>
+            <div style={{ fontSize: 13 }}>
+              Run the pipeline, then click <strong>Refresh Current Laws</strong> in the Admin panel.
+            </div>
+          </div>
+        )}
+
+        {!loading && matrix && matrix.jurisdictions.length > 0 && (
+          <div className="card" style={{ overflowX: "auto", padding: 0 }}>
             <table style={{ borderCollapse: "collapse", fontSize: 13, width: "100%" }}>
               <thead>
-                <tr>
+                <tr style={{ background: "#f9fafb", borderBottom: "1px solid var(--color-border)" }}>
                   <th
                     style={{
-                      padding: "10px 12px",
-                      borderBottom: "2px solid #e5e7eb",
+                      padding: "14px 16px",
                       textAlign: "left",
-                      background: "#f9fafb",
+                      fontWeight: 600,
+                      fontSize: 11,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.05em",
+                      color: "var(--color-text-muted)",
                       position: "sticky",
                       left: 0,
-                      minWidth: 180,
+                      background: "#f9fafb",
+                      minWidth: 200,
+                      zIndex: 2,
                     }}
                   >
                     Jurisdiction
@@ -155,13 +174,14 @@ export default function LawsPage() {
                     <th
                       key={topic}
                       style={{
-                        padding: "10px 8px",
-                        borderBottom: "2px solid #e5e7eb",
+                        padding: "14px 12px",
                         textAlign: "left",
-                        background: "#f9fafb",
                         fontWeight: 600,
                         fontSize: 11,
-                        minWidth: 140,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.03em",
+                        color: "var(--color-text-muted)",
+                        minWidth: 170,
                       }}
                     >
                       {matrix.topic_labels[topic] || topic}
@@ -170,55 +190,67 @@ export default function LawsPage() {
                 </tr>
               </thead>
               <tbody>
-                {matrix.jurisdictions.map((jur) => (
-                  <tr key={jur.jurisdiction_id}>
+                {matrix.jurisdictions.map((jur, rowIdx) => (
+                  <tr key={jur.jurisdiction_id} style={{ borderBottom: "1px solid #f1f5f9" }}>
                     <td
                       style={{
-                        padding: "10px 12px",
-                        borderBottom: "1px solid #f3f4f6",
-                        fontWeight: 500,
+                        padding: "12px 16px",
+                        fontWeight: 600,
                         position: "sticky",
                         left: 0,
-                        background: "#fff",
+                        background: rowIdx % 2 === 0 ? "#fff" : "#fafbfc",
+                        zIndex: 1,
                       }}
                     >
-                      {jur.jurisdiction_name}
-                      <div style={{ fontSize: 10, color: "#9ca3af", textTransform: "uppercase" }}>
+                      <div>{jur.jurisdiction_name}</div>
+                      <div
+                        style={{
+                          fontSize: 10,
+                          color: "var(--color-text-subtle)",
+                          textTransform: "uppercase",
+                          fontWeight: 500,
+                          marginTop: 2,
+                          letterSpacing: "0.05em",
+                        }}
+                      >
                         {jur.jurisdiction_level}
+                        {jur.state_code && ` · ${jur.state_code}`}
                       </div>
                     </td>
                     {topicsWithCoverage.map((topic) => {
                       const cell = jur.topics[topic];
                       if (!cell) {
                         return (
-                          <td
-                            key={topic}
-                            style={{
-                              padding: "8px",
-                              borderBottom: "1px solid #f3f4f6",
-                              color: "#d1d5db",
-                              fontSize: 11,
-                            }}
-                          >
+                          <td key={topic} style={{ padding: "10px 12px", color: "#d1d5db", fontSize: 16 }}>
                             —
                           </td>
                         );
                       }
+                      const conf = CONFIDENCE[cell.confidence] || CONFIDENCE.med;
                       return (
-                        <td
-                          key={topic}
-                          onClick={() => openSnapshot(cell.snapshot_id)}
-                          style={{
-                            padding: "6px 8px",
-                            borderBottom: "1px solid #f3f4f6",
-                            background: CONFIDENCE_BG[cell.confidence] || "#f9fafb",
-                            borderLeft: `3px solid ${CONFIDENCE_COLOR[cell.confidence] || "#6b7280"}`,
-                            cursor: "pointer",
-                            fontSize: 11,
-                            color: "#374151",
-                          }}
-                        >
-                          {cell.headline || cell.confidence.toUpperCase()}
+                        <td key={topic} style={{ padding: "6px 10px" }}>
+                          <button
+                            onClick={() => openSnapshot(cell.snapshot_id)}
+                            style={{
+                              background: conf.bg,
+                              border: "none",
+                              borderLeft: `3px solid ${conf.color}`,
+                              padding: "8px 12px",
+                              borderRadius: 6,
+                              fontSize: 11,
+                              color: "#374151",
+                              cursor: "pointer",
+                              textAlign: "left",
+                              width: "100%",
+                              lineHeight: 1.4,
+                              fontWeight: 500,
+                              transition: "transform 100ms ease",
+                            }}
+                            onMouseEnter={(e) => (e.currentTarget.style.transform = "scale(1.02)")}
+                            onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
+                          >
+                            {cell.headline || conf.label}
+                          </button>
                         </td>
                       );
                     })}
@@ -227,128 +259,190 @@ export default function LawsPage() {
               </tbody>
             </table>
           </div>
-        </div>
-      )}
+        )}
+      </main>
 
       {selected && (
-        <div
-          onClick={() => setSelected(null)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.4)",
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "center",
-            padding: "48px 16px",
-            zIndex: 50,
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              background: "#fff",
-              borderRadius: 12,
-              padding: 24,
-              maxWidth: 720,
-              width: "100%",
-              maxHeight: "85vh",
-              overflowY: "auto",
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>
-              <div>
-                <div style={{ fontSize: 11, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.05 }}>
-                  {selected.topic.replace(/_/g, " ")}
-                </div>
-                <h2 style={{ margin: "4px 0", fontSize: 18, fontWeight: 700 }}>
-                  {selected.headline || "Current Law Summary"}
-                </h2>
-              </div>
-              <button
-                onClick={() => setSelected(null)}
-                style={{
-                  background: "transparent",
-                  border: "none",
-                  fontSize: 20,
-                  cursor: "pointer",
-                  color: "#6b7280",
-                  padding: 4,
-                }}
-              >
-                ×
-              </button>
-            </div>
-
-            <span
-              style={{
-                display: "inline-block",
-                fontSize: 10,
-                fontWeight: 600,
-                textTransform: "uppercase",
-                color: CONFIDENCE_COLOR[selected.confidence],
-                background: CONFIDENCE_BG[selected.confidence],
-                padding: "2px 8px",
-                borderRadius: 4,
-                marginBottom: 12,
-              }}
-            >
-              {selected.confidence} confidence
-            </span>
-
-            <p style={{ fontSize: 14, lineHeight: 1.6, color: "#1f2937" }}>{selected.summary}</p>
-
-            {selected.key_facts && selected.key_facts.length > 0 && (
-              <>
-                <h3 style={{ fontSize: 13, fontWeight: 600, marginTop: 16, marginBottom: 6, color: "#374151" }}>Key facts</h3>
-                <ul style={{ paddingLeft: 20, fontSize: 13, lineHeight: 1.5 }}>
-                  {selected.key_facts.map((fact, i) => (
-                    <li key={i}>{fact}</li>
-                  ))}
-                </ul>
-              </>
-            )}
-
-            {selected.statutory_references && selected.statutory_references.length > 0 && (
-              <>
-                <h3 style={{ fontSize: 13, fontWeight: 600, marginTop: 16, marginBottom: 6, color: "#374151" }}>Statutory references</h3>
-                <ul style={{ paddingLeft: 20, fontSize: 13, lineHeight: 1.5 }}>
-                  {selected.statutory_references.map((ref, i) => (
-                    <li key={i}>
-                      <code style={{ background: "#f3f4f6", padding: "1px 4px", borderRadius: 3 }}>{ref}</code>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-
-            {selected.caveats && (
-              <div
-                style={{
-                  marginTop: 16,
-                  background: "#fefce8",
-                  border: "1px solid #fef08a",
-                  borderRadius: 6,
-                  padding: "8px 12px",
-                  fontSize: 12,
-                  color: "#854d0e",
-                }}
-              >
-                <strong>Note:</strong> {selected.caveats}
-              </div>
-            )}
-
-            {selected.source_item_ids && selected.source_item_ids.length > 0 && (
-              <div style={{ marginTop: 12, fontSize: 11, color: "#9ca3af" }}>
-                Synthesized from {selected.source_item_ids.length} policy item{selected.source_item_ids.length !== 1 ? "s" : ""}.
-                {selected.updated_at && ` Last updated ${new Date(selected.updated_at).toLocaleDateString()}.`}
-              </div>
-            )}
-          </div>
-        </div>
+        <SnapshotDetail snapshot={selected} onClose={() => setSelected(null)} />
       )}
 
       <AdminControls />
+    </div>
+  );
+}
+
+function ConfidenceDot({ color, label }: { color: string; label: string }) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 3,
+        margin: "0 4px 0 8px",
+      }}
+    >
+      <span
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          background: color,
+          display: "inline-block",
+        }}
+      />
+      <span style={{ fontSize: 12 }}>{label}</span>
+    </span>
+  );
+}
+
+function SnapshotDetail({ snapshot, onClose }: { snapshot: LawSnapshot; onClose: () => void }) {
+  const conf = CONFIDENCE[snapshot.confidence] || CONFIDENCE.med;
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(15, 23, 42, 0.4)",
+        backdropFilter: "blur(4px)",
+        display: "flex",
+        alignItems: "flex-start",
+        justifyContent: "center",
+        padding: "48px 16px",
+        zIndex: 60,
+        overflowY: "auto",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "#fff",
+          borderRadius: 14,
+          padding: 28,
+          maxWidth: 720,
+          width: "100%",
+          maxHeight: "85vh",
+          overflowY: "auto",
+          boxShadow: "0 25px 50px -12px rgba(0,0,0,0.25)",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 16 }}>
+          <div>
+            <div
+              style={{
+                fontSize: 10,
+                color: "var(--color-text-subtle)",
+                textTransform: "uppercase",
+                letterSpacing: "0.08em",
+                fontWeight: 600,
+              }}
+            >
+              {snapshot.topic.replace(/_/g, " ")}
+            </div>
+            <h2 style={{ margin: "6px 0 0", fontSize: 22, fontWeight: 700, letterSpacing: "-0.02em", lineHeight: 1.3 }}>
+              {snapshot.headline || "Current Law Summary"}
+            </h2>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              background: "#f1f5f9",
+              border: "none",
+              width: 32,
+              height: 32,
+              borderRadius: 8,
+              fontSize: 16,
+              cursor: "pointer",
+              color: "var(--color-text-muted)",
+              flexShrink: 0,
+            }}
+          >
+            ×
+          </button>
+        </div>
+
+        <span
+          style={{
+            display: "inline-block",
+            fontSize: 10,
+            fontWeight: 700,
+            textTransform: "uppercase",
+            letterSpacing: "0.05em",
+            color: conf.color,
+            background: conf.bg,
+            padding: "4px 10px",
+            borderRadius: 999,
+            marginBottom: 18,
+          }}
+        >
+          {snapshot.confidence} confidence
+        </span>
+
+        <p style={{ fontSize: 15, lineHeight: 1.7, color: "var(--color-text)", margin: "0 0 16px" }}>
+          {snapshot.summary}
+        </p>
+
+        {snapshot.key_facts && snapshot.key_facts.length > 0 && (
+          <section style={{ marginBottom: 16 }}>
+            <h3 style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--color-text-muted)", margin: "0 0 8px" }}>
+              Key Facts
+            </h3>
+            <ul style={{ paddingLeft: 22, fontSize: 14, lineHeight: 1.6, margin: 0 }}>
+              {snapshot.key_facts.map((fact, i) => (
+                <li key={i} style={{ marginBottom: 4 }}>{fact}</li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {snapshot.statutory_references && snapshot.statutory_references.length > 0 && (
+          <section style={{ marginBottom: 16 }}>
+            <h3 style={{ fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--color-text-muted)", margin: "0 0 8px" }}>
+              Statutory References
+            </h3>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {snapshot.statutory_references.map((ref, i) => (
+                <code
+                  key={i}
+                  style={{
+                    background: "#f1f5f9",
+                    padding: "4px 10px",
+                    borderRadius: 6,
+                    fontSize: 12,
+                    fontWeight: 500,
+                  }}
+                >
+                  {ref}
+                </code>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {snapshot.caveats && (
+          <div
+            style={{
+              background: "#fef3c7",
+              border: "1px solid #fde68a",
+              borderRadius: 8,
+              padding: "10px 14px",
+              fontSize: 12,
+              color: "#713f12",
+              lineHeight: 1.5,
+            }}
+          >
+            <strong>Note:</strong> {snapshot.caveats}
+          </div>
+        )}
+
+        {snapshot.source_item_ids && snapshot.source_item_ids.length > 0 && (
+          <div style={{ marginTop: 14, fontSize: 11, color: "var(--color-text-subtle)" }}>
+            Synthesized from {snapshot.source_item_ids.length} policy item{snapshot.source_item_ids.length !== 1 ? "s" : ""}
+            {snapshot.updated_at && ` · Updated ${new Date(snapshot.updated_at).toLocaleDateString()}`}.
+          </div>
+        )}
+      </div>
     </div>
   );
 }

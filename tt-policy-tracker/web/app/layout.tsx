@@ -1,8 +1,12 @@
 import type { Metadata } from "next";
+import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "TT Policy Tracker",
-  description: "TurboTenant Legislative Policy Tracker — Internal Dashboard",
+  title: "Jeanne Machine",
+  description: "Rental housing policy intelligence — federal, state, and local legislation tracked, summarized, and delivered.",
+  icons: {
+    icon: "/logo.svg",
+  },
 };
 
 export default function RootLayout({
@@ -12,9 +16,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body style={{ margin: 0, fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", backgroundColor: "#f8fafc", color: "#1a1a1a" }}>
-        {children}
-      </body>
+      <body>{children}</body>
     </html>
   );
 }

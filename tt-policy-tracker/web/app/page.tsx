@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { AdminControls } from "./components/AdminControls";
 import { Filters } from "./components/Filters";
+import { Header } from "./components/Header";
 import { Nav } from "./components/Nav";
 import { PolicyItemCard } from "./components/PolicyItemCard";
 import { StatsBar } from "./components/StatsBar";
@@ -29,8 +30,6 @@ interface ApiResponse {
   items: PolicyItem[];
 }
 
-const API_BASE = "/api";
-
 export default function Dashboard() {
   const [items, setItems] = useState<PolicyItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -50,7 +49,8 @@ export default function Dashboard() {
     params.set("limit", "50");
 
     setLoading(true);
-    fetch(`${API_BASE}/items?${params}`)
+    setError(null);
+    fetch(`/api/items?${params}`)
       .then((r) => {
         if (!r.ok) throw new Error(`API returned ${r.status}`);
         return r.json();
@@ -61,7 +61,7 @@ export default function Dashboard() {
       })
       .catch((err) => {
         console.error("Failed to fetch items:", err);
-        setError("Could not connect to the API backend. Make sure NEXT_PUBLIC_API_URL is configured.");
+        setError("Could not connect to the API. Check that NEXT_PUBLIC_API_URL is configured.");
         setItems([]);
         setTotal(0);
       })
@@ -69,59 +69,77 @@ export default function Dashboard() {
   }, [filters]);
 
   return (
-    <div style={{ maxWidth: 960, margin: "0 auto", padding: "24px 16px" }}>
-      <header style={{ marginBottom: 16 }}>
-        <h1 style={{ fontSize: 24, fontWeight: 700, color: "#1a56db", margin: 0 }}>
-          TT Policy Tracker
-        </h1>
-        <p style={{ color: "#6b7280", fontSize: 14, margin: "4px 0 0 0" }}>
-          Internal legislative monitoring dashboard
-        </p>
-      </header>
+    <div>
+      <Header subtitle="Rental housing policy intelligence" />
 
-      <Nav />
-
-      <StatsBar />
-
-      <Filters filters={filters} onChange={setFilters} />
-
-      <div style={{ marginBottom: 12, fontSize: 13, color: "#6b7280" }}>
-        {loading ? "Loading..." : `${total} item${total !== 1 ? "s" : ""}`}
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {items.map((item) => (
-          <PolicyItemCard key={item.id} item={item} />
-        ))}
-      </div>
-
-      {error && (
+      <main
+        className="page-fade-in"
+        style={{
+          maxWidth: 1000,
+          margin: "0 auto",
+          padding: "0 24px 48px",
+          position: "relative",
+          zIndex: 2,
+        }}
+      >
         <div
+          className="card"
           style={{
-            background: "#fef2f2",
-            border: "1px solid #fecaca",
-            borderRadius: 8,
-            padding: "12px 16px",
-            marginBottom: 16,
-            color: "#991b1b",
-            fontSize: 13,
+            padding: "20px 24px",
+            marginBottom: 20,
+            boxShadow: "var(--shadow-lg)",
           }}
         >
-          {error}
-        </div>
-      )}
+          <Nav />
+          <StatsBar />
+          <Filters filters={filters} onChange={setFilters} />
 
-      {!loading && !error && items.length === 0 && (
-        <div
-          style={{
-            textAlign: "center",
-            padding: 48,
-            color: "#9ca3af",
-          }}
-        >
-          No policy items found. Run the ingestion and enrichment pipelines to populate data.
+          <div style={{ fontSize: 12, color: "var(--color-text-subtle)", fontWeight: 600 }}>
+            {loading ? "Loading..." : `${total} item${total !== 1 ? "s" : ""}`}
+          </div>
         </div>
-      )}
+
+        {error && (
+          <div
+            className="card"
+            style={{
+              background: "#fef2f2",
+              borderColor: "#fecaca",
+              padding: "14px 18px",
+              color: "#991b1b",
+              fontSize: 13,
+              marginBottom: 16,
+            }}
+          >
+            {error}
+          </div>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {items.map((item) => (
+            <PolicyItemCard key={item.id} item={item} />
+          ))}
+        </div>
+
+        {!loading && !error && items.length === 0 && (
+          <div
+            className="card"
+            style={{
+              textAlign: "center",
+              padding: 48,
+              color: "var(--color-text-subtle)",
+            }}
+          >
+            <div style={{ fontSize: 36, marginBottom: 8 }}>📭</div>
+            <div style={{ fontSize: 15, color: "var(--color-text)", fontWeight: 600, marginBottom: 4 }}>
+              No policy items yet
+            </div>
+            <div style={{ fontSize: 13 }}>
+              Use the Admin panel to run the ingestion and enrichment pipelines.
+            </div>
+          </div>
+        )}
+      </main>
 
       <AdminControls />
     </div>

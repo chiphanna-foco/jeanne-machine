@@ -21,14 +21,17 @@ const IMPACTS = [
   { value: "low", label: "Low" },
 ];
 
-const selectStyle: React.CSSProperties = {
-  padding: "8px 12px",
-  borderRadius: 6,
-  border: "1px solid #d1d5db",
+const inputStyle: React.CSSProperties = {
+  padding: "9px 12px",
+  borderRadius: 8,
+  border: "1px solid var(--color-border-strong)",
   fontSize: 13,
   background: "#fff",
-  color: "#374151",
-  cursor: "pointer",
+  color: "var(--color-text)",
+  fontFamily: "inherit",
+  fontWeight: 500,
+  outline: "none",
+  transition: "border-color 160ms ease, box-shadow 160ms ease",
 };
 
 interface FiltersProps {
@@ -37,10 +40,24 @@ interface FiltersProps {
 }
 
 export function Filters({ filters, onChange }: FiltersProps) {
+  const hasFilters = filters.topic || filters.impact || filters.state;
+
   return (
-    <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+    <div
+      style={{
+        display: "flex",
+        gap: 8,
+        marginBottom: 16,
+        flexWrap: "wrap",
+        alignItems: "center",
+      }}
+    >
+      <span style={{ fontSize: 12, color: "var(--color-text-subtle)", fontWeight: 600 }}>
+        Filter:
+      </span>
+
       <select
-        style={selectStyle}
+        style={{ ...inputStyle, cursor: "pointer" }}
         value={filters.topic || ""}
         onChange={(e) => onChange({ ...filters, topic: e.target.value || undefined })}
       >
@@ -52,7 +69,7 @@ export function Filters({ filters, onChange }: FiltersProps) {
       </select>
 
       <select
-        style={selectStyle}
+        style={{ ...inputStyle, cursor: "pointer" }}
         value={filters.impact || ""}
         onChange={(e) => onChange({ ...filters, impact: e.target.value || undefined })}
       >
@@ -65,14 +82,30 @@ export function Filters({ filters, onChange }: FiltersProps) {
 
       <input
         type="text"
-        placeholder="State code (e.g. CO, OH)"
+        placeholder="State code (e.g. CO)"
         value={filters.state || ""}
-        onChange={(e) => onChange({ ...filters, state: e.target.value || undefined })}
-        style={{
-          ...selectStyle,
-          width: 180,
-        }}
+        onChange={(e) => onChange({ ...filters, state: e.target.value.toUpperCase() || undefined })}
+        maxLength={2}
+        style={{ ...inputStyle, width: 140 }}
       />
+
+      {hasFilters && (
+        <button
+          onClick={() => onChange({})}
+          style={{
+            padding: "6px 12px",
+            fontSize: 12,
+            fontWeight: 600,
+            color: "var(--color-text-muted)",
+            background: "transparent",
+            border: "1px solid var(--color-border)",
+            borderRadius: 8,
+            cursor: "pointer",
+          }}
+        >
+          Clear
+        </button>
+      )}
     </div>
   );
 }

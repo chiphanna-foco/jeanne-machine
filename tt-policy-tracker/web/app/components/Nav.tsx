@@ -4,9 +4,9 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const NAV_ITEMS = [
-  { href: "/", label: "Policy Items" },
-  { href: "/laws", label: "Current Laws" },
-  { href: "/drafts", label: "Content Drafts" },
+  { href: "/", label: "Policy Feed", icon: "📋" },
+  { href: "/laws", label: "Current Laws", icon: "⚖️" },
+  { href: "/drafts", label: "Content Drafts", icon: "✍️" },
 ];
 
 export function Nav() {
@@ -17,8 +17,13 @@ export function Nav() {
       style={{
         display: "flex",
         gap: 4,
+        background: "#fff",
+        borderRadius: 12,
+        padding: 4,
+        border: "1px solid var(--color-border)",
+        boxShadow: "var(--shadow-sm)",
+        width: "fit-content",
         marginBottom: 24,
-        borderBottom: "1px solid #e5e7eb",
       }}
     >
       {NAV_ITEMS.map((item) => {
@@ -28,15 +33,21 @@ export function Nav() {
             key={item.href}
             href={item.href}
             style={{
-              padding: "10px 16px",
-              fontSize: 14,
-              color: active ? "#1a56db" : "#6b7280",
-              fontWeight: active ? 600 : 500,
-              borderBottom: active ? "2px solid #1a56db" : "2px solid transparent",
+              padding: "8px 14px",
+              fontSize: 13,
+              color: active ? "#fff" : "var(--color-text-muted)",
+              fontWeight: 600,
+              background: active ? "var(--color-primary)" : "transparent",
+              borderRadius: 8,
               textDecoration: "none",
-              marginBottom: -1,
+              transition: "all 160ms ease",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              whiteSpace: "nowrap",
             }}
           >
+            <span style={{ fontSize: 14 }}>{item.icon}</span>
             {item.label}
           </Link>
         );
