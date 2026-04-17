@@ -13,42 +13,49 @@ const CARDS = [
     key: "total_items" as const,
     label: "Policy Items",
     sublabel: "AI-analyzed",
-    accent: "#1e3a8a",
-    iconBg: "rgba(30, 58, 138, 0.08)",
-    icon: (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-        <path d="M7 3h10a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" stroke="currentColor" strokeWidth="1.6"/>
-        <path d="M9 8h6M9 12h6M9 16h4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
-      </svg>
-    ),
+    gradient: "linear-gradient(135deg, #7c3aed 0%, #a855f7 100%)",
+    glow: "rgba(168, 85, 247, 0.35)",
+    emoji: "📋",
   },
   {
     key: "high_impact_items" as const,
     label: "High Impact",
-    sublabel: "Urgent attention",
-    accent: "#dc2626",
-    iconBg: "rgba(220, 38, 38, 0.08)",
-    icon: (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-        <path d="M12 2 3 22h18L12 2z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round"/>
-        <path d="M12 9v6M12 18h.01" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
-      </svg>
-    ),
+    sublabel: "Eyes up",
+    gradient: "linear-gradient(135deg, #ec4899 0%, #f59e0b 100%)",
+    glow: "rgba(236, 72, 153, 0.35)",
+    emoji: "🚨",
   },
   {
     key: "total_jurisdictions" as const,
     label: "Jurisdictions",
-    sublabel: "Federal + state + local",
-    accent: "#059669",
-    iconBg: "rgba(5, 150, 105, 0.08)",
-    icon: (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-        <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.6"/>
-        <path d="M3 12h18M12 3a12 12 0 0 1 0 18M12 3a12 12 0 0 0 0 18" stroke="currentColor" strokeWidth="1.6"/>
-      </svg>
-    ),
+    sublabel: "Coast to coast",
+    gradient: "linear-gradient(135deg, #06b6d4 0%, #0ea5e9 100%)",
+    glow: "rgba(6, 182, 212, 0.35)",
+    emoji: "🗺️",
   },
 ];
+
+function useCountUp(target: number, duration = 900) {
+  const [value, setValue] = useState(0);
+  useEffect(() => {
+    if (!target) {
+      setValue(0);
+      return;
+    }
+    let start = performance.now();
+    let raf = 0;
+    const tick = (now: number) => {
+      const elapsed = now - start;
+      const t = Math.min(elapsed / duration, 1);
+      const eased = 1 - Math.pow(1 - t, 3);
+      setValue(Math.round(target * eased));
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, duration]);
+  return value;
+}
 
 export function StatsBar() {
   const [stats, setStats] = useState<Stats | null>(null);
@@ -70,57 +77,94 @@ export function StatsBar() {
       style={{
         display: "grid",
         gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-        gap: 12,
+        gap: 14,
         marginBottom: 24,
       }}
     >
       {CARDS.map((card) => (
-        <div
-          key={card.key}
-          className="card"
-          style={{
-            padding: "18px 20px",
-            display: "flex",
-            alignItems: "center",
-            gap: 14,
-          }}
-        >
-          <div
-            style={{
-              width: 40,
-              height: 40,
-              borderRadius: 10,
-              background: card.iconBg,
-              color: card.accent,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              flexShrink: 0,
-            }}
-          >
-            {card.icon}
-          </div>
-          <div>
-            <div
-              style={{
-                fontSize: 24,
-                fontWeight: 700,
-                color: card.accent,
-                lineHeight: 1,
-                letterSpacing: "-0.03em",
-              }}
-            >
-              {stats[card.key].toLocaleString()}
-            </div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-text)", marginTop: 4 }}>
-              {card.label}
-            </div>
-            <div style={{ fontSize: 11, color: "var(--color-text-subtle)", marginTop: 1 }}>
-              {card.sublabel}
-            </div>
-          </div>
-        </div>
+        <StatCard key={card.key} card={card} value={stats[card.key]} />
       ))}
+    </div>
+  );
+}
+
+function StatCard({
+  card,
+  value,
+}: {
+  card: (typeof CARDS)[number];
+  value: number;
+}) {
+  const display = useCountUp(value);
+  return (
+    <div
+      style={{
+        position: "relative",
+        overflow: "hidden",
+        padding: "20px 22px",
+        borderRadius: 14,
+        background: "#fff",
+        border: "1px solid var(--color-border)",
+        boxShadow: "var(--shadow-sm)",
+        transition: "transform 220ms ease, box-shadow 220ms ease",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.transform = "translateY(-3px)";
+        e.currentTarget.style.boxShadow = `0 12px 30px ${card.glow}`;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.transform = "translateY(0)";
+        e.currentTarget.style.boxShadow = "var(--shadow-sm)";
+      }}
+    >
+      {/* Accent gradient strip */}
+      <div
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          height: 4,
+          background: card.gradient,
+        }}
+      />
+
+      {/* Background emoji */}
+      <div
+        style={{
+          position: "absolute",
+          top: 10,
+          right: 14,
+          fontSize: 36,
+          opacity: 0.12,
+          filter: "grayscale(0.2)",
+          pointerEvents: "none",
+        }}
+      >
+        {card.emoji}
+      </div>
+
+      <div
+        style={{
+          fontSize: 36,
+          fontWeight: 900,
+          lineHeight: 1,
+          letterSpacing: "-0.04em",
+          background: card.gradient,
+          WebkitBackgroundClip: "text",
+          WebkitTextFillColor: "transparent",
+          backgroundClip: "text",
+          marginTop: 10,
+        }}
+      >
+        {display.toLocaleString()}
+      </div>
+      <div style={{ fontSize: 14, fontWeight: 700, color: "var(--color-text)", marginTop: 6 }}>
+        {card.label}
+      </div>
+      <div style={{ fontSize: 11, color: "var(--color-text-subtle)", marginTop: 2, fontWeight: 500 }}>
+        {card.sublabel}
+      </div>
     </div>
   );
 }

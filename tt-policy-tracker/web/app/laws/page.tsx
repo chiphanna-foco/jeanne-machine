@@ -79,7 +79,7 @@ export default function LawsPage() {
 
   return (
     <div>
-      <Header subtitle="Current law repository by jurisdiction and topic" />
+      <Header subtitle="Every housing law, every jurisdiction, AI-synthesized." />
 
       <main
         className="page-fade-in"
@@ -136,13 +136,13 @@ export default function LawsPage() {
         )}
 
         {!loading && matrix && matrix.jurisdictions.length === 0 && (
-          <div className="card" style={{ textAlign: "center", padding: 48, color: "var(--color-text-subtle)" }}>
-            <div style={{ fontSize: 36, marginBottom: 8 }}>📚</div>
-            <div style={{ fontSize: 15, color: "var(--color-text)", fontWeight: 600, marginBottom: 4 }}>
-              No law snapshots yet
+          <div className="card" style={{ textAlign: "center", padding: 56, color: "var(--color-text-subtle)" }}>
+            <div style={{ fontSize: 48, marginBottom: 12 }}>📚</div>
+            <div style={{ fontSize: 17, color: "var(--color-text)", fontWeight: 700, marginBottom: 6, letterSpacing: "-0.01em" }}>
+              Library&apos;s looking empty
             </div>
-            <div style={{ fontSize: 13 }}>
-              Run the pipeline, then click <strong>Refresh Current Laws</strong> in the Admin panel.
+            <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+              Once Jeanne has some policy items to work with, hit <strong>Refresh Current Laws</strong> in the Admin panel.
             </div>
           </div>
         )}

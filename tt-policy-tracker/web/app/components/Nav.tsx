@@ -4,9 +4,9 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const NAV_ITEMS = [
-  { href: "/", label: "Policy Feed", icon: "📋" },
-  { href: "/laws", label: "Current Laws", icon: "⚖️" },
-  { href: "/drafts", label: "Content Drafts", icon: "✍️" },
+  { href: "/", label: "Policy Feed", emoji: "📋" },
+  { href: "/laws", label: "Current Laws", emoji: "⚖️" },
+  { href: "/drafts", label: "Content Drafts", emoji: "✍️" },
 ];
 
 export function Nav() {
@@ -16,12 +16,10 @@ export function Nav() {
     <nav
       style={{
         display: "flex",
-        gap: 4,
-        background: "#fff",
-        borderRadius: 12,
-        padding: 4,
-        border: "1px solid var(--color-border)",
-        boxShadow: "var(--shadow-sm)",
+        gap: 6,
+        background: "#f1f5f9",
+        borderRadius: 14,
+        padding: 5,
         width: "fit-content",
         marginBottom: 24,
       }}
@@ -33,21 +31,24 @@ export function Nav() {
             key={item.href}
             href={item.href}
             style={{
-              padding: "8px 14px",
+              padding: "9px 16px",
               fontSize: 13,
               color: active ? "#fff" : "var(--color-text-muted)",
-              fontWeight: 600,
-              background: active ? "var(--color-primary)" : "transparent",
-              borderRadius: 8,
+              fontWeight: 700,
+              background: active
+                ? "linear-gradient(135deg, #7c3aed 0%, #ec4899 100%)"
+                : "transparent",
+              borderRadius: 10,
               textDecoration: "none",
-              transition: "all 160ms ease",
+              transition: "all 180ms ease",
               display: "flex",
               alignItems: "center",
               gap: 6,
               whiteSpace: "nowrap",
+              boxShadow: active ? "0 4px 14px rgba(124, 58, 237, 0.35)" : "none",
             }}
           >
-            <span style={{ fontSize: 14 }}>{item.icon}</span>
+            <span style={{ fontSize: 15 }}>{item.emoji}</span>
             {item.label}
           </Link>
         );

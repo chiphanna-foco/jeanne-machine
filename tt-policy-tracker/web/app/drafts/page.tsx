@@ -82,7 +82,7 @@ export default function DraftsPage() {
 
   return (
     <div>
-      <Header subtitle="AI-generated content from high-impact policy items" />
+      <Header subtitle="Policy news, turned into blog posts while you sleep." />
 
       <main
         className="page-fade-in"
@@ -126,13 +126,13 @@ export default function DraftsPage() {
         )}
 
         {!loading && drafts.length === 0 && (
-          <div className="card" style={{ textAlign: "center", padding: 48, color: "var(--color-text-subtle)" }}>
-            <div style={{ fontSize: 36, marginBottom: 8 }}>✍️</div>
-            <div style={{ fontSize: 15, color: "var(--color-text)", fontWeight: 600, marginBottom: 4 }}>
-              No drafts yet
+          <div className="card" style={{ textAlign: "center", padding: 56, color: "var(--color-text-subtle)" }}>
+            <div style={{ fontSize: 48, marginBottom: 12 }}>✍️</div>
+            <div style={{ fontSize: 17, color: "var(--color-text)", fontWeight: 700, marginBottom: 6, letterSpacing: "-0.01em" }}>
+              No drafts cooking yet
             </div>
-            <div style={{ fontSize: 13 }}>
-              Click <strong>Generate Blog Drafts</strong> in the Admin panel to create drafts from high-impact policy items.
+            <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+              Ready to let Jeanne write for you? Click <strong>Generate Blog Drafts</strong> in the Admin panel.
             </div>
           </div>
         )}

@@ -3,10 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Jeanne Machine",
-  description: "Rental housing policy intelligence — federal, state, and local legislation tracked, summarized, and delivered.",
-  icons: {
-    icon: "/logo.svg",
-  },
+  description: "She reads every rental housing law in America so you don't have to.",
 };
 
 export default function RootLayout({

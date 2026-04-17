@@ -70,7 +70,7 @@ export default function Dashboard() {
 
   return (
     <div>
-      <Header subtitle="Rental housing policy intelligence" />
+      <Header subtitle="She reads every rental housing law in America so you don't have to." />
 
       <main
         className="page-fade-in"
@@ -126,16 +126,16 @@ export default function Dashboard() {
             className="card"
             style={{
               textAlign: "center",
-              padding: 48,
+              padding: 56,
               color: "var(--color-text-subtle)",
             }}
           >
-            <div style={{ fontSize: 36, marginBottom: 8 }}>📭</div>
-            <div style={{ fontSize: 15, color: "var(--color-text)", fontWeight: 600, marginBottom: 4 }}>
-              No policy items yet
+            <div style={{ fontSize: 48, marginBottom: 12 }}>🕵️‍♀️</div>
+            <div style={{ fontSize: 17, color: "var(--color-text)", fontWeight: 700, marginBottom: 6, letterSpacing: "-0.01em" }}>
+              Nothing in the feed yet
             </div>
-            <div style={{ fontSize: 13 }}>
-              Use the Admin panel to run the ingestion and enrichment pipelines.
+            <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+              Jeanne&apos;s ready to read. Hit the <strong>Admin</strong> button (bottom-right) to kick off her first run.
             </div>
           </div>
         )}
