@@ -55,7 +55,17 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "tt-policy-tracker"}
+    return {"status": "ok", "service": "jeanne-machine"}
+
+
+@app.get("/")
+async def root():
+    return {
+        "service": "Jeanne Machine API",
+        "status": "ok",
+        "dashboard": "https://jeanne-machine.vercel.app",
+        "docs": "/docs",
+    }
 
 
 # ── Auth verification ──────────────────────────────────────────────
