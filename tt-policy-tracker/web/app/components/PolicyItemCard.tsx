@@ -107,7 +107,7 @@ export function PolicyItemCard({ item }: { item: PolicyItem }) {
         </div>
 
         {/* Title */}
-        <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, lineHeight: 1.35 }}>
+        <h3 style={{ margin: 0, fontSize: 17, fontWeight: 600, lineHeight: 1.35 }}>
           {item.source_url ? (
             <a
               href={item.source_url}
@@ -134,7 +134,7 @@ export function PolicyItemCard({ item }: { item: PolicyItem }) {
         </h3>
 
         {/* Summary */}
-        <p style={{ margin: 0, fontSize: 14, lineHeight: 1.6, color: "var(--color-text-muted)" }}>
+        <p style={{ margin: 0, fontSize: 15, lineHeight: 1.65, color: "var(--color-text-muted)" }}>
           {item.summary}
         </p>
 
@@ -142,12 +142,12 @@ export function PolicyItemCard({ item }: { item: PolicyItem }) {
         {item.impact_reasoning && (
           <div
             style={{
-              fontSize: 13,
+              fontSize: 14,
               color: "var(--color-text-muted)",
               borderLeft: "3px solid var(--color-border)",
-              paddingLeft: 10,
+              paddingLeft: 12,
               fontStyle: "italic",
-              lineHeight: 1.5,
+              lineHeight: 1.6,
             }}
           >
             {item.impact_reasoning}
