@@ -1,0 +1,23 @@
+name: Daily pipeline
+
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit /admin/cron-daily
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${API_BASE_URL:-}" ] || [ -z "${ADMIN_TOKEN:-}" ]; then
+            echo "Missing API_BASE_URL or ADMIN_TOKEN repo secret" >&2
+            exit 1
+          fi
+          curl -sS --fail-with-body --max-time 30 \
+            "${API_BASE_URL%/}/admin/cron-daily?token=${ADMIN_TOKEN}"
