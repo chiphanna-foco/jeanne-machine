@@ -1,3 +1,5 @@
+# Fires /admin/cron-daily so the search pipeline runs even when nobody
+# clicks the admin button. Requires repo secrets API_BASE_URL and ADMIN_TOKEN.
 name: Daily pipeline
 
 on:
