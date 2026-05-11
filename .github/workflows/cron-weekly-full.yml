@@ -1,0 +1,26 @@
+# Fires /admin/cron-weekly-full on Fridays at 23:00 UTC (5pm MDT / 4pm MST).
+# Runs the heavier weekly pipeline: 7-day ingest, 100-doc enrichment, law-repo
+# refresh, Slack digest. Requires repo secrets API_BASE_URL and ADMIN_TOKEN.
+name: Weekly full pipeline
+
+on:
+  schedule:
+    - cron: "0 23 * * 5"
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit /admin/cron-weekly-full
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${API_BASE_URL:-}" ] || [ -z "${ADMIN_TOKEN:-}" ]; then
+            echo "Missing API_BASE_URL or ADMIN_TOKEN repo secret" >&2
+            exit 1
+          fi
+          curl -sS --fail-with-body --max-time 30 \
+            "${API_BASE_URL%/}/admin/cron-weekly-full?token=${ADMIN_TOKEN}"
