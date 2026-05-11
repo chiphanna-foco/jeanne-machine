@@ -320,6 +320,7 @@ async def _run_pipeline_task(days_back: int, batch_size: int):
     _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
 
     results = {"ingested": 0, "enriched": 0, "irrelevant": 0, "errors": []}
+    new_item_ids: list[int] = []
 
     try:
         # ── Step 1: Ingest ──
@@ -379,6 +380,7 @@ async def _run_pipeline_task(days_back: int, batch_size: int):
                     item = await enrich_document(session, raw)
                     if item:
                         results["enriched"] += 1
+                        new_item_ids.append(item.id)
                     else:
                         results["irrelevant"] += 1
                     await session.commit()
@@ -386,6 +388,37 @@ async def _run_pipeline_task(days_back: int, batch_size: int):
                 err = f"enrich raw_id={raw_id}: {type(e).__name__}: {str(e)[:300]}"
                 logger.error(err)
                 results["errors"].append(err)
+
+        # ── Step 3: Slack push if any new items ──
+        if new_item_ids and settings.slack_webhook_url:
+            try:
+                from digest.slack import build_slack_blocks, send_to_slack
+
+                async with async_session() as session:
+                    rows = await session.execute(
+                        select(PolicyItem)
+                        .where(PolicyItem.id.in_(new_item_ids))
+                        .order_by(
+                            PolicyItem.impact_score.desc(),
+                            PolicyItem.discovered_at.desc(),
+                        )
+                    )
+                    items = list(rows.scalars().all())
+
+                date_range = datetime.utcnow().strftime("%b %d, %Y")
+                blocks = build_slack_blocks(items, frequency="search", date_range=date_range)
+                fallback = (
+                    f"TT Policy Tracker — {len(items)} new item"
+                    f"{'s' if len(items) != 1 else ''}"
+                )
+                ok = await send_to_slack(settings.slack_webhook_url, blocks, fallback_text=fallback)
+                results["slack_sent"] = ok
+                results["slack_item_count"] = len(items)
+                if not ok:
+                    results["errors"].append("Slack webhook send failed")
+            except Exception as e:
+                results["errors"].append(f"slack stage: {type(e).__name__}: {str(e)[:300]}")
+                logger.error(f"Slack push from pipeline failed: {e}", exc_info=True)
 
     except Exception as e:
         results["errors"].append(f"pipeline error: {str(e)}")
