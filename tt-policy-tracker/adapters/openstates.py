@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://v3.openstates.org"
 
-# Phase 0: OH and CO. Phase 2: all 50 states + DC.
-PHASE0_STATES = ["oh", "co"]
+# Phase 0: OH, CO, WA. Phase 2: all 50 states + DC.
+PHASE0_STATES = ["oh", "co", "wa"]
 
 # Open States API v3 requires OCD jurisdiction IDs
 STATE_TO_JURISDICTION = {
@@ -159,7 +159,7 @@ class OpenStatesAdapter(BaseAdapter):
 
         docs = []
         page = 1
-        max_pages = 5  # Cap to avoid runaway pagination
+        max_pages = 50  # Cap to avoid runaway pagination (50 pages × 20/page = 1000 bills/state/run)
 
         while page <= max_pages:
             resp = None
