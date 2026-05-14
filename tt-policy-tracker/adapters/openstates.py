@@ -102,7 +102,9 @@ class OpenStatesAdapter(BaseAdapter):
 
     def __init__(self, client: httpx.AsyncClient | None = None, states: list[str] | None = None):
         super().__init__(client or httpx.AsyncClient(timeout=120.0))
-        self.states = states or PHASE0_STATES
+        if states is None:
+            states = ALL_STATES if settings.openstates_scope == "all" else PHASE0_STATES
+        self.states = states
         self.api_key = settings.openstates_api_key
 
     def _headers(self) -> dict:
