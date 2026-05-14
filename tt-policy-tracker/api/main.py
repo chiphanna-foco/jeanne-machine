@@ -634,8 +634,8 @@ async def cron_daily(token: str | None = Query(default=None)):
     if not _check_admin_token(token):
         return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
 
-    asyncio.create_task(_run_pipeline_task(days_back=3, batch_size=50))
-    return {"status": "started", "message": "Daily cron pipeline started (3 days back, 50 enrichment batch)."}
+    asyncio.create_task(_run_pipeline_task(days_back=3, batch_size=300))
+    return {"status": "started", "message": "Daily cron pipeline started (3 days back, 300 enrichment batch)."}
 
 
 @app.get("/admin/cron-weekly-digest")
@@ -1014,7 +1014,7 @@ async def cron_weekly_full(token: str | None = Query(default=None)):
 
     Full sequence:
       1. Ingest last 7 days from all adapters
-      2. Enrich up to 100 new raw documents
+      2. Enrich up to 500 new raw documents
       3. Refresh law snapshots for any jurisdiction+topic pairs with activity
       4. Send Slack digest of new items (if SLACK_WEBHOOK_URL set)
     """
@@ -1082,7 +1082,7 @@ async def _run_weekly_full_task():
                 select(RawDocument.id)
                 .where(RawDocument.id.notin_(subquery))
                 .order_by(RawDocument.fetched_at.desc())
-                .limit(100)
+                .limit(500)
             )
             result = await session.execute(query)
             raw_ids = list(result.scalars().all())
