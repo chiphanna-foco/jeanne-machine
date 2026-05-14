@@ -542,6 +542,60 @@ async def db_stats(
     }
 
 
+@app.get("/admin/audit/coverage")
+async def admin_audit_coverage(
+    state: list[str] = Query(default=[]),
+    days_back: int = Query(default=30, ge=1, le=365),
+    token: str | None = Query(default=None),
+):
+    """Compare housing-tagged Open States bills to what's in our DB.
+
+    Usage:
+      /admin/audit/coverage?token=YOUR_TOKEN&state=co&state=wa&days_back=90
+
+    With no `state` param, runs against all 50 jurisdictions — slow, may
+    exceed Railway's request timeout. Pass one or more `state=XX` for a
+    fast targeted run.
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    from adapters.openstates import ALL_STATES
+    from audit import coverage
+
+    states = [s.lower() for s in state] if state else ALL_STATES
+    return await coverage(states, days_back)
+
+
+@app.get("/admin/audit/trace")
+async def admin_audit_trace(
+    bill: list[str] = Query(default=[]),
+    rerun_classifier: bool = Query(default=True),
+    token: str | None = Query(default=None),
+):
+    """Trace specific bills through the pipeline.
+
+    Usage:
+      /admin/audit/trace?token=YOUR_TOKEN&bill=CO:SB26-054&bill=WA:HB1217
+
+    `rerun_classifier=true` (default) re-runs the Haiku relevance check on
+    the stored raw_text when no PolicyItem exists, so you can see what
+    verdict it would give now.
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    if not bill:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Provide at least one bill, e.g. ?bill=CO:SB26-054"},
+        )
+
+    from audit import trace
+
+    return await trace(bill, rerun_classifier)
+
+
 @app.get("/admin/reset-raw")
 async def reset_raw_documents(
     token: str | None = Query(default=None),
