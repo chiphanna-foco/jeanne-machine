@@ -283,7 +283,7 @@ def _check_admin_token(token: str | None) -> bool:
 
 @app.get("/admin/run-pipeline")
 async def run_pipeline(
-    days_back: int = Query(default=30, le=90),
+    days_back: int = Query(default=30, le=730),
     batch_size: int = Query(default=50, le=200),
     token: str | None = Query(default=None),
 ):
@@ -545,7 +545,7 @@ async def db_stats(
 @app.get("/admin/audit/coverage")
 async def admin_audit_coverage(
     state: list[str] = Query(default=[]),
-    days_back: int = Query(default=30, ge=1, le=365),
+    days_back: int = Query(default=30, ge=1, le=730),
     token: str | None = Query(default=None),
 ):
     """Compare housing-tagged Open States bills to what's in our DB.
