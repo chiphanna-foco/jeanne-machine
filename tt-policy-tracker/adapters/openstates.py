@@ -161,7 +161,7 @@ class OpenStatesAdapter(BaseAdapter):
 
         docs = []
         page = 1
-        max_pages = 50  # Cap to avoid runaway pagination (50 pages × 20/page = 1000 bills/state/run)
+        max_pages = 200  # 200 pages × 20/page = 4000 bills/state/run
 
         while page <= max_pages:
             resp = None
@@ -175,6 +175,7 @@ class OpenStatesAdapter(BaseAdapter):
                         params={
                             "jurisdiction": jurisdiction_id,
                             "updated_since": since_str,
+                            "sort": "updated_desc",
                             "page": page,
                             "per_page": 20,
                             "apikey": self.api_key,
