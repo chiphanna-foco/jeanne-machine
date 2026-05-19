@@ -542,6 +542,59 @@ async def db_stats(
     }
 
 
+@app.get("/admin/backfill-bill")
+async def admin_backfill_bill(
+    state: str = Query(..., description="Two-letter state code, e.g. wa"),
+    identifier: str = Query(..., description="Bill identifier, e.g. HB1217 or SB26-054"),
+    token: str | None = Query(default=None),
+):
+    """Surgical backfill: fetch one specific bill from Open States and ingest it.
+
+    Bypasses the normal time-window and pagination flow. Useful when a known
+    bill isn't being picked up by routine ingest.
+
+    Usage:
+      /admin/backfill-bill?state=wa&identifier=HB1217&token=YOUR_TOKEN
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    import httpx
+
+    from adapters.openstates import OpenStatesAdapter
+    from audit import _find_os_bill
+    from enrichment.pipeline import ingest_raw_doc
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        bill = await _find_os_bill(client, state.lower(), identifier)
+    if not bill:
+        return {
+            "status": "not_found",
+            "message": f"Open States has no bill matching {state.upper()}:{identifier}",
+        }
+
+    adapter = OpenStatesAdapter()
+    doc = adapter._normalize_bill(bill, state.lower())
+    if not doc:
+        return {"status": "normalize_failed", "bill_id": bill["id"]}
+
+    async with async_session() as session:
+        raw = await ingest_raw_doc(session, doc)
+        await session.commit()
+        if not raw:
+            return {
+                "status": "duplicate",
+                "bill_id": bill["id"],
+                "message": "Already in DB (content_hash match)",
+            }
+        return {
+            "status": "ingested",
+            "bill_id": bill["id"],
+            "raw_document_id": raw.id,
+            "title": doc.title,
+        }
+
+
 @app.get("/admin/audit/coverage")
 async def admin_audit_coverage(
     state: list[str] = Query(default=[]),
