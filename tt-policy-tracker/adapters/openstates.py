@@ -18,9 +18,12 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://v3.openstates.org"
 
-# Free-tier Open States caps at 10 req/min. We pace at ~9/min (6.7s min interval)
-# to leave headroom and avoid 429s.
-OS_MIN_REQUEST_INTERVAL = 6.7
+# Free-tier Open States caps at 10 req/min. We pace at ~7.5/min (8s min
+# interval) and share that rate state across every OpenStatesAdapter
+# instance in the process — concurrent pipelines (e.g. a cron run firing
+# while a manual backfill is in progress) would otherwise each have their
+# own limiter and collectively exceed the cap.
+OS_MIN_REQUEST_INTERVAL = 8.0
 
 # Phase 0: OH, CO, WA. Phase 2: all 50 states + DC.
 PHASE0_STATES = ["oh", "co", "wa"]
@@ -102,6 +105,10 @@ RELEVANT_SUBJECTS = {
 class OpenStatesAdapter(BaseAdapter):
     """Fetches state-level bills from the Open States API v3."""
 
+    # Class-level rate state so concurrent adapter instances share the budget.
+    _last_request_at: float = 0.0
+    _rate_lock: asyncio.Lock | None = None
+
     @property
     def source_name(self) -> str:
         return "openstates"
@@ -112,10 +119,10 @@ class OpenStatesAdapter(BaseAdapter):
             states = ALL_STATES if settings.openstates_scope == "all" else PHASE0_STATES
         self.states = states
         self.api_key = settings.openstates_api_key
-        # Per-instance rate limit + lock so concurrent state fetches still pace
-        # within the 10 req/min free-tier cap.
-        self._last_request_at: float = 0.0
-        self._rate_lock = asyncio.Lock()
+        # Lazy-init the class-level lock on first instance so we don't need a
+        # running event loop at module import time.
+        if OpenStatesAdapter._rate_lock is None:
+            OpenStatesAdapter._rate_lock = asyncio.Lock()
 
     def _headers(self) -> dict:
         return {"X-API-KEY": self.api_key, "Accept": "application/json"}
@@ -124,21 +131,23 @@ class OpenStatesAdapter(BaseAdapter):
         self,
         path: str,
         params: dict,
-        max_retries: int = 5,
+        max_retries: int = 10,
     ) -> httpx.Response:
         """Rate-limited GET with 429 / transient-error backoff.
 
-        Paces requests to OS_MIN_REQUEST_INTERVAL seconds apart. On 429,
-        honors the server's `Retry-After` header (or sleeps 60s) and retries.
-        Raises on the final failure so callers can decide what to do.
+        Paces requests OS_MIN_REQUEST_INTERVAL seconds apart (shared across
+        all adapter instances). On 429, honors Retry-After but never sleeps
+        less than an exponentially-growing floor — so successive 429s wait
+        progressively longer in case OS uses a multi-minute rolling window.
         """
         last_exc: Exception | None = None
         for attempt in range(max_retries):
-            async with self._rate_lock:
-                elapsed = time.monotonic() - self._last_request_at
+            assert OpenStatesAdapter._rate_lock is not None
+            async with OpenStatesAdapter._rate_lock:
+                elapsed = time.monotonic() - OpenStatesAdapter._last_request_at
                 if elapsed < OS_MIN_REQUEST_INTERVAL:
                     await asyncio.sleep(OS_MIN_REQUEST_INTERVAL - elapsed)
-                self._last_request_at = time.monotonic()
+                OpenStatesAdapter._last_request_at = time.monotonic()
 
             try:
                 resp = await self.client.get(
@@ -146,7 +155,7 @@ class OpenStatesAdapter(BaseAdapter):
                 )
             except Exception as e:
                 last_exc = e
-                wait = 2 ** attempt
+                wait = min(2 ** attempt, 300)
                 logger.warning(
                     f"OpenStates {path} attempt {attempt+1} request failed "
                     f"({type(e).__name__}); sleeping {wait}s"
@@ -155,9 +164,12 @@ class OpenStatesAdapter(BaseAdapter):
                 continue
 
             if resp.status_code == 429:
-                retry_after = 60
+                # Exponential floor: 60, 120, 240, 480, capped at 600s
+                exp_floor = min(60 * (2 ** attempt), 600)
+                retry_after = exp_floor
                 try:
-                    retry_after = int(resp.headers.get("Retry-After", "60"))
+                    header_value = int(resp.headers.get("Retry-After", "0"))
+                    retry_after = max(header_value, exp_floor)
                 except (TypeError, ValueError):
                     pass
                 logger.warning(
