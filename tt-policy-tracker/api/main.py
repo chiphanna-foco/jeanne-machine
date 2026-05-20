@@ -344,15 +344,23 @@ async def _run_pipeline_task(
         from adapters.federal_register import FederalRegisterAdapter
         from adapters.legistar import LegistarAdapter
         from adapters.openstates import ALL_STATES, OpenStatesAdapter
+        from adapters.wa_leg import WaLegAdapter
         from enrichment.pipeline import enrich_document, ingest_raw_doc
 
         since = datetime.utcnow() - timedelta(days=days_back)
         if states_filter:
-            adapters = [OpenStatesAdapter(states=states_filter)]
+            states_lower = [s.lower() for s in states_filter]
+            adapters = []
+            # Direct state adapters first — they don't share rate budgets
+            # with Open States and may succeed when OS is throttled.
+            if "wa" in states_lower:
+                adapters.append(WaLegAdapter())
+            adapters.append(OpenStatesAdapter(states=states_filter))
         else:
             os_states = ALL_STATES if settings.openstates_scope == "all" else None
             adapters = [
                 OpenStatesAdapter(states=os_states),
+                WaLegAdapter(),
                 CongressAdapter(),
                 FederalRegisterAdapter(),
                 LegistarAdapter(),
