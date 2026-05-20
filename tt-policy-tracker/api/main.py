@@ -352,6 +352,15 @@ async def _run_pipeline_task(days_back: int, batch_size: int):
                         if raw:
                             results["ingested"] += 1
                     await session.commit()
+                # Surface per-state stats if the adapter exposes them
+                per_state = getattr(adapter, "last_run_stats", None)
+                if per_state:
+                    results.setdefault("openstates_by_state", per_state)
+                    for st, info in per_state.items():
+                        if info.get("error"):
+                            results["errors"].append(
+                                f"openstates {st}: {info['error']}"
+                            )
             except Exception as e:
                 err = f"{adapter.source_name}: {str(e)}"
                 logger.error(err, exc_info=True)
@@ -540,6 +549,47 @@ async def db_stats(
         "unenriched_remaining": unenriched,
         "recent_raw_samples": samples,
     }
+
+
+@app.get("/admin/stats-by-state")
+async def stats_by_state(
+    token: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Per-state document counts (raw + enriched) so we can see coverage at a glance.
+
+    Usage: /admin/stats-by-state?token=YOUR_TOKEN
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    raw_q = (
+        select(Jurisdiction.state_code, func.count(RawDocument.id))
+        .join(RawDocument, RawDocument.jurisdiction_id == Jurisdiction.id)
+        .where(Jurisdiction.state_code.isnot(None))
+        .group_by(Jurisdiction.state_code)
+    )
+    raw_counts = {row[0]: row[1] for row in (await session.execute(raw_q)).all()}
+
+    enriched_q = (
+        select(Jurisdiction.state_code, func.count(PolicyItem.id))
+        .join(PolicyItem, PolicyItem.jurisdiction_id == Jurisdiction.id)
+        .where(Jurisdiction.state_code.isnot(None))
+        .group_by(Jurisdiction.state_code)
+    )
+    enriched_counts = {row[0]: row[1] for row in (await session.execute(enriched_q)).all()}
+
+    states = sorted(set(raw_counts) | set(enriched_counts))
+    rows = [
+        {
+            "state": s,
+            "raw": raw_counts.get(s, 0),
+            "enriched": enriched_counts.get(s, 0),
+        }
+        for s in states
+    ]
+    rows.sort(key=lambda r: r["raw"], reverse=True)
+    return {"states": rows}
 
 
 @app.get("/admin/backfill-bill")
