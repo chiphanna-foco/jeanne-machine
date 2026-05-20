@@ -138,19 +138,25 @@ class OpenStatesAdapter(BaseAdapter):
         """Fetch bills updated since `since` for the configured states."""
         docs = []
         since_str = since.strftime("%Y-%m-%d")
+        # Per-state results recorded on the instance so the pipeline can surface them.
+        self.last_run_stats: dict[str, dict] = {}
 
         for state in self.states:
             jurisdiction_id = STATE_TO_JURISDICTION.get(state.lower())
             if not jurisdiction_id:
                 logger.warning(f"No OCD jurisdiction ID for state: {state}")
+                self.last_run_stats[state.upper()] = {"fetched": 0, "error": "no jurisdiction id"}
                 continue
 
             try:
                 state_docs = await self._fetch_state_bills(state, jurisdiction_id, since_str)
                 docs.extend(state_docs)
+                self.last_run_stats[state.upper()] = {"fetched": len(state_docs), "error": None}
                 logger.info(f"OpenStates: fetched {len(state_docs)} bills from {state.upper()} since {since_str}")
             except Exception as e:
-                logger.error(f"OpenStates: failed for {state.upper()}: {e}")
+                msg = f"{type(e).__name__}: {str(e)[:200]}"
+                logger.error(f"OpenStates: failed for {state.upper()}: {msg}")
+                self.last_run_stats[state.upper()] = {"fetched": 0, "error": msg}
                 # Continue with other states instead of aborting
 
         return docs
