@@ -285,21 +285,32 @@ def _check_admin_token(token: str | None) -> bool:
 async def run_pipeline(
     days_back: int = Query(default=30, le=730),
     batch_size: int = Query(default=50, le=200),
+    state: list[str] = Query(default=[]),
     token: str | None = Query(default=None),
 ):
     """Trigger ingestion + enrichment in one call.
 
-    Usage: /admin/run-pipeline?days_back=30&batch_size=50&token=YOUR_TOKEN
+    Usage:
+      /admin/run-pipeline?days_back=30&batch_size=50&token=YOUR_TOKEN
+
+    Optional `state` (repeatable): restrict OpenStates ingest to these
+    two-letter state codes only and skip the other adapters. Useful for
+    targeted backfill without waiting on a full 50-state run.
+      /admin/run-pipeline?days_back=365&state=wa&state=ca&token=...
     """
     if not _check_admin_token(token):
         return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
 
-    # Run in background so the request doesn't timeout
-    asyncio.create_task(_run_pipeline_task(days_back, batch_size))
+    states_filter = [s.lower() for s in state] if state else None
+    asyncio.create_task(_run_pipeline_task(days_back, batch_size, states_filter))
 
     return {
         "status": "started",
-        "message": f"Pipeline started: ingesting {days_back} days back, then enriching up to {batch_size} docs. Check /admin/pipeline-status for progress.",
+        "message": (
+            f"Pipeline started: ingesting {days_back} days back"
+            + (f" (states={states_filter})" if states_filter else "")
+            + f", then enriching up to {batch_size} docs. Check /admin/pipeline-status for progress."
+        ),
     }
 
 
@@ -314,7 +325,11 @@ async def pipeline_status(token: str | None = Query(default=None)):
     return _pipeline_status
 
 
-async def _run_pipeline_task(days_back: int, batch_size: int):
+async def _run_pipeline_task(
+    days_back: int,
+    batch_size: int,
+    states_filter: list[str] | None = None,
+):
     """Background task: ingest from all adapters, then enrich."""
     global _pipeline_status
     _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
@@ -332,15 +347,18 @@ async def _run_pipeline_task(days_back: int, batch_size: int):
         from enrichment.pipeline import enrich_document, ingest_raw_doc
 
         since = datetime.utcnow() - timedelta(days=days_back)
-        os_states = ALL_STATES if settings.openstates_scope == "all" else None
-        adapters = [
-            OpenStatesAdapter(states=os_states),
-            CongressAdapter(),
-            FederalRegisterAdapter(),
-            LegistarAdapter(),
-        ]
-        if settings.courtlistener_api_token:
-            adapters.append(CourtListenerAdapter())
+        if states_filter:
+            adapters = [OpenStatesAdapter(states=states_filter)]
+        else:
+            os_states = ALL_STATES if settings.openstates_scope == "all" else None
+            adapters = [
+                OpenStatesAdapter(states=os_states),
+                CongressAdapter(),
+                FederalRegisterAdapter(),
+                LegistarAdapter(),
+            ]
+            if settings.courtlistener_api_token:
+                adapters.append(CourtListenerAdapter())
 
         for adapter in adapters:
             try:
@@ -444,24 +462,45 @@ async def _run_pipeline_task(days_back: int, batch_size: int):
 async def run_enrich_only(
     batch_size: int = Query(default=200, le=500),
     min_confidence: float = Query(default=0.5),
+    source: str | None = Query(default=None),
+    state: str | None = Query(default=None),
     token: str | None = Query(default=None),
 ):
-    """Run enrichment only (no ingestion). Optionally lower the confidence threshold.
+    """Run enrichment only (no ingestion). Optionally filter the queue.
 
-    Usage: /admin/run-enrich?batch_size=200&min_confidence=0.4&token=YOUR_TOKEN
+    Usage:
+      /admin/run-enrich?batch_size=200&token=YOUR_TOKEN
+      /admin/run-enrich?source=openstates&state=wa&batch_size=200&token=...
+
+    Filters (both optional):
+      - source: adapter name (openstates, congress, federal_register,
+        legistar, courtlistener)
+      - state: two-letter state code (filters raw docs by their
+        jurisdiction's state_code)
     """
     if not _check_admin_token(token):
         return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
 
-    asyncio.create_task(_run_enrich_task(batch_size, min_confidence))
+    asyncio.create_task(_run_enrich_task(batch_size, min_confidence, source, state))
 
     return {
         "status": "started",
-        "message": f"Enrichment started: batch_size={batch_size}, min_confidence={min_confidence}. Check /admin/pipeline-status for progress.",
+        "message": (
+            f"Enrichment started: batch_size={batch_size}, "
+            f"min_confidence={min_confidence}"
+            + (f", source={source}" if source else "")
+            + (f", state={state.upper()}" if state else "")
+            + ". Check /admin/pipeline-status for progress."
+        ),
     }
 
 
-async def _run_enrich_task(batch_size: int, min_confidence: float):
+async def _run_enrich_task(
+    batch_size: int,
+    min_confidence: float,
+    source: str | None = None,
+    state: str | None = None,
+):
     global _pipeline_status
     _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
 
@@ -470,6 +509,7 @@ async def _run_enrich_task(batch_size: int, min_confidence: float):
     try:
         from enrichment.classifier import classify_document
         from enrichment.summarizer import summarize_document
+        from storage.models import SourceAdapter
 
         # Temporarily override the confidence threshold
         original_threshold = settings.relevance_confidence_threshold
@@ -477,12 +517,16 @@ async def _run_enrich_task(batch_size: int, min_confidence: float):
 
         async with async_session() as session:
             subquery = select(PolicyItem.raw_document_id)
-            query = (
-                select(RawDocument.id)
-                .where(RawDocument.id.notin_(subquery))
-                .order_by(RawDocument.fetched_at.desc())
-                .limit(batch_size)
-            )
+            query = select(RawDocument.id).where(RawDocument.id.notin_(subquery))
+            if source:
+                query = query.join(
+                    SourceAdapter, RawDocument.source_adapter_id == SourceAdapter.id
+                ).where(SourceAdapter.name == source)
+            if state:
+                query = query.join(
+                    Jurisdiction, RawDocument.jurisdiction_id == Jurisdiction.id
+                ).where(Jurisdiction.state_code == state.upper())
+            query = query.order_by(RawDocument.fetched_at.desc()).limit(batch_size)
             result = await session.execute(query)
             raw_ids = list(result.scalars().all())
 
