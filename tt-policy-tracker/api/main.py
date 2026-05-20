@@ -381,11 +381,12 @@ async def _run_pipeline_task(
                 # Surface per-state stats if the adapter exposes them
                 per_state = getattr(adapter, "last_run_stats", None)
                 if per_state:
-                    results.setdefault("openstates_by_state", per_state)
+                    key = f"{adapter.source_name}_by_state"
+                    results[key] = per_state
                     for st, info in per_state.items():
                         if info.get("error"):
                             results["errors"].append(
-                                f"openstates {st}: {info['error']}"
+                                f"{adapter.source_name} {st}: {info['error']}"
                             )
             except Exception as e:
                 err = f"{adapter.source_name}: {str(e)}"
@@ -642,6 +643,104 @@ async def stats_by_state(
     ]
     rows.sort(key=lambda r: r["raw"], reverse=True)
     return {"states": rows}
+
+
+@app.get("/admin/wsl-probe")
+async def wsl_probe(
+    biennium: str = Query(default="2025-26"),
+    bill_number: str = Query(default="1217"),
+    topical_index: str = Query(default="Housing"),
+    token: str | None = Query(default=None),
+):
+    """Probe WSL Web Services to figure out which call pattern works.
+
+    wa_leg is currently 500'ing on every request — this hits multiple
+    endpoint/parameter variants and returns the raw status + response
+    snippet for each so we can see exactly what WSL accepts.
+
+    Usage:
+      /admin/wsl-probe?token=YOUR_TOKEN
+      /admin/wsl-probe?biennium=2025-26&bill_number=1217&topical_index=Housing&token=...
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    import httpx
+
+    base = "https://wslwebservices.leg.wa.gov"
+    headers_default = {
+        "User-Agent": "jeanne-machine/1.0 (rental policy tracker)",
+        "Accept": "application/xml,text/xml,*/*",
+    }
+
+    probes = [
+        {
+            "label": "GetLegislation (known-good)",
+            "method": "GET",
+            "url": f"{base}/LegislationService.asmx/GetLegislation",
+            "params": {"biennium": biennium, "billNumber": bill_number},
+        },
+        {
+            "label": "GetTopicalIndexes",
+            "method": "GET",
+            "url": f"{base}/LegislationService.asmx/GetTopicalIndexes",
+            "params": {"biennium": biennium},
+        },
+        {
+            "label": "GetLegislationByTopicalIndex (lowercase params)",
+            "method": "GET",
+            "url": f"{base}/LegislationService.asmx/GetLegislationByTopicalIndex",
+            "params": {"biennium": biennium, "topicalIndex": topical_index},
+        },
+        {
+            "label": "GetLegislationByTopicalIndex (PascalCase params)",
+            "method": "GET",
+            "url": f"{base}/LegislationService.asmx/GetLegislationByTopicalIndex",
+            "params": {"Biennium": biennium, "TopicalIndex": topical_index},
+        },
+        {
+            "label": "GetLegislationByTopicalIndex (POST form)",
+            "method": "POST",
+            "url": f"{base}/LegislationService.asmx/GetLegislationByTopicalIndex",
+            "data": {"biennium": biennium, "topicalIndex": topical_index},
+        },
+    ]
+
+    results = []
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for p in probes:
+            try:
+                if p["method"] == "GET":
+                    resp = await client.get(
+                        p["url"], params=p.get("params"), headers=headers_default
+                    )
+                else:
+                    resp = await client.post(
+                        p["url"],
+                        data=p.get("data"),
+                        headers={
+                            **headers_default,
+                            "Content-Type": "application/x-www-form-urlencoded",
+                        },
+                    )
+                results.append(
+                    {
+                        "label": p["label"],
+                        "url": str(resp.request.url),
+                        "status": resp.status_code,
+                        "snippet": resp.text[:400],
+                    }
+                )
+            except Exception as e:
+                results.append(
+                    {
+                        "label": p["label"],
+                        "url": p["url"],
+                        "status": None,
+                        "snippet": f"{type(e).__name__}: {str(e)[:300]}",
+                    }
+                )
+    return {"probes": results}
 
 
 @app.get("/admin/backfill-bill")
