@@ -4,7 +4,9 @@ Phase 0 scope: Ohio (OH) and Colorado (CO) only.
 API docs: https://docs.openstates.org/api-v3/
 """
 
+import asyncio
 import logging
+import time
 from datetime import datetime
 
 import httpx
@@ -15,6 +17,10 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://v3.openstates.org"
+
+# Free-tier Open States caps at 10 req/min. We pace at ~9/min (6.7s min interval)
+# to leave headroom and avoid 429s.
+OS_MIN_REQUEST_INTERVAL = 6.7
 
 # Phase 0: OH, CO, WA. Phase 2: all 50 states + DC.
 PHASE0_STATES = ["oh", "co", "wa"]
@@ -106,19 +112,77 @@ class OpenStatesAdapter(BaseAdapter):
             states = ALL_STATES if settings.openstates_scope == "all" else PHASE0_STATES
         self.states = states
         self.api_key = settings.openstates_api_key
+        # Per-instance rate limit + lock so concurrent state fetches still pace
+        # within the 10 req/min free-tier cap.
+        self._last_request_at: float = 0.0
+        self._rate_lock = asyncio.Lock()
 
     def _headers(self) -> dict:
         return {"X-API-KEY": self.api_key, "Accept": "application/json"}
+
+    async def _request(
+        self,
+        path: str,
+        params: dict,
+        max_retries: int = 5,
+    ) -> httpx.Response:
+        """Rate-limited GET with 429 / transient-error backoff.
+
+        Paces requests to OS_MIN_REQUEST_INTERVAL seconds apart. On 429,
+        honors the server's `Retry-After` header (or sleeps 60s) and retries.
+        Raises on the final failure so callers can decide what to do.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            async with self._rate_lock:
+                elapsed = time.monotonic() - self._last_request_at
+                if elapsed < OS_MIN_REQUEST_INTERVAL:
+                    await asyncio.sleep(OS_MIN_REQUEST_INTERVAL - elapsed)
+                self._last_request_at = time.monotonic()
+
+            try:
+                resp = await self.client.get(
+                    f"{BASE_URL}{path}", params=params, headers=self._headers()
+                )
+            except Exception as e:
+                last_exc = e
+                wait = 2 ** attempt
+                logger.warning(
+                    f"OpenStates {path} attempt {attempt+1} request failed "
+                    f"({type(e).__name__}); sleeping {wait}s"
+                )
+                await asyncio.sleep(wait)
+                continue
+
+            if resp.status_code == 429:
+                retry_after = 60
+                try:
+                    retry_after = int(resp.headers.get("Retry-After", "60"))
+                except (TypeError, ValueError):
+                    pass
+                logger.warning(
+                    f"OpenStates {path} 429 rate-limited; sleeping {retry_after}s "
+                    f"(attempt {attempt+1}/{max_retries})"
+                )
+                await asyncio.sleep(retry_after)
+                continue
+
+            return resp
+
+        if last_exc:
+            raise Exception(
+                f"OpenStates {path}: {max_retries} retries exhausted: "
+                f"{type(last_exc).__name__}: {last_exc}"
+            )
+        raise Exception(
+            f"OpenStates {path}: {max_retries} retries exhausted (last status 429)"
+        )
 
     async def discover_jurisdictions(self) -> list[dict]:
         """Return jurisdiction info for the configured states."""
         jurisdictions = []
         for state in self.states:
-            resp = await self.client.get(
-                f"{BASE_URL}/jurisdictions",
-                params={"classification": "state"},
-                headers=self._headers(),
-            )
+            resp = await self._request("/jurisdictions", {"classification": "state"})
             resp.raise_for_status()
             for j in resp.json().get("results", []):
                 jur_state = j.get("id", "").split("/")[-1].split(":")[0] if j.get("id") else ""
@@ -162,40 +226,22 @@ class OpenStatesAdapter(BaseAdapter):
         return docs
 
     async def _fetch_state_bills(self, state: str, jurisdiction_id: str, since_str: str) -> list[RawDoc]:
-        """Fetch bills for a single state with retries and smaller page size."""
-        import asyncio
-
+        """Fetch bills for a single state, rate-limited and 429-aware."""
         docs = []
         page = 1
         max_pages = 200  # 200 pages × 20/page = 4000 bills/state/run
 
         while page <= max_pages:
-            resp = None
-            last_err = None
-
-            # Retry up to 3 times per page
-            for attempt in range(3):
-                try:
-                    resp = await self.client.get(
-                        f"{BASE_URL}/bills",
-                        params={
-                            "jurisdiction": jurisdiction_id,
-                            "updated_since": since_str,
-                            "sort": "updated_desc",
-                            "page": page,
-                            "per_page": 20,
-                            "apikey": self.api_key,
-                        },
-                        headers=self._headers(),
-                    )
-                    break
-                except Exception as req_err:
-                    last_err = req_err
-                    logger.warning(f"OpenStates {state.upper()} page {page} attempt {attempt+1} failed: {type(req_err).__name__}")
-                    await asyncio.sleep(2 * (attempt + 1))
-
-            if resp is None:
-                raise Exception(f"Open States request failed for {state.upper()} after 3 retries: {type(last_err).__name__}: {last_err}")
+            resp = await self._request(
+                "/bills",
+                {
+                    "jurisdiction": jurisdiction_id,
+                    "updated_since": since_str,
+                    "sort": "updated_desc",
+                    "page": page,
+                    "per_page": 20,
+                },
+            )
 
             if resp.status_code != 200:
                 body = resp.text[:500]
