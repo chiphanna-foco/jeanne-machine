@@ -675,34 +675,22 @@ async def wsl_probe(
 
     probes = [
         {
+            "label": "LegislationService help page (lists methods)",
+            "method": "GET",
+            "url": f"{base}/LegislationService.asmx",
+            "params": None,
+        },
+        {
+            "label": "LegislationService WSDL",
+            "method": "GET",
+            "url": f"{base}/LegislationService.asmx",
+            "params": {"WSDL": ""},
+        },
+        {
             "label": "GetLegislation (known-good)",
             "method": "GET",
             "url": f"{base}/LegislationService.asmx/GetLegislation",
             "params": {"biennium": biennium, "billNumber": bill_number},
-        },
-        {
-            "label": "GetTopicalIndexes",
-            "method": "GET",
-            "url": f"{base}/LegislationService.asmx/GetTopicalIndexes",
-            "params": {"biennium": biennium},
-        },
-        {
-            "label": "GetLegislationByTopicalIndex (lowercase params)",
-            "method": "GET",
-            "url": f"{base}/LegislationService.asmx/GetLegislationByTopicalIndex",
-            "params": {"biennium": biennium, "topicalIndex": topical_index},
-        },
-        {
-            "label": "GetLegislationByTopicalIndex (PascalCase params)",
-            "method": "GET",
-            "url": f"{base}/LegislationService.asmx/GetLegislationByTopicalIndex",
-            "params": {"Biennium": biennium, "TopicalIndex": topical_index},
-        },
-        {
-            "label": "GetLegislationByTopicalIndex (POST form)",
-            "method": "POST",
-            "url": f"{base}/LegislationService.asmx/GetLegislationByTopicalIndex",
-            "data": {"biennium": biennium, "topicalIndex": topical_index},
         },
     ]
 
@@ -728,7 +716,7 @@ async def wsl_probe(
                         "label": p["label"],
                         "url": str(resp.request.url),
                         "status": resp.status_code,
-                        "snippet": resp.text[:400],
+                        "snippet": resp.text[:3000],
                     }
                 )
             except Exception as e:
