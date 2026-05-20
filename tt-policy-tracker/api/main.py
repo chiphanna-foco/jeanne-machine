@@ -673,62 +673,73 @@ async def wsl_probe(
         "Accept": "application/xml,text/xml,*/*",
     }
 
-    probes = [
-        {
-            "label": "LegislationService help page (lists methods)",
-            "method": "GET",
-            "url": f"{base}/LegislationService.asmx",
-            "params": None,
-        },
-        {
-            "label": "LegislationService WSDL",
-            "method": "GET",
-            "url": f"{base}/LegislationService.asmx",
-            "params": {"WSDL": ""},
-        },
-        {
-            "label": "GetLegislation (known-good)",
-            "method": "GET",
-            "url": f"{base}/LegislationService.asmx/GetLegislation",
-            "params": {"biennium": biennium, "billNumber": bill_number},
-        },
+    # WSL has multiple .asmx services; the housing/topical index methods could
+    # live on any of them. Probe the ones most likely to expose bill/topic
+    # discovery methods.
+    candidate_services = [
+        "LegislationService",
+        "LegislationDocumentService",
+        "SponsorService",
+        "BillSummaryService",
+        "AmendmentService",
+        "LegislativeCalendarService",
+        "CommitteeMeetingService",
+        "CommitteeActionService",
+        "LegislativeDocumentService",
     ]
 
-    results = []
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        for p in probes:
+    import re
+
+    services_summary = []
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        for svc in candidate_services:
+            url = f"{base}/{svc}.asmx"
             try:
-                if p["method"] == "GET":
-                    resp = await client.get(
-                        p["url"], params=p.get("params"), headers=headers_default
-                    )
-                else:
-                    resp = await client.post(
-                        p["url"],
-                        data=p.get("data"),
-                        headers={
-                            **headers_default,
-                            "Content-Type": "application/x-www-form-urlencoded",
-                        },
-                    )
-                results.append(
+                resp = await client.get(url, headers=headers_default)
+                # ASMX help page links every method as <a href="...?op=MethodName">
+                methods = sorted(set(re.findall(r"\?op=([A-Za-z0-9_]+)", resp.text)))
+                services_summary.append(
                     {
-                        "label": p["label"],
-                        "url": str(resp.request.url),
+                        "service": svc,
+                        "url": url,
                         "status": resp.status_code,
-                        "snippet": resp.text[:3000],
+                        "method_count": len(methods),
+                        "methods": methods,
                     }
                 )
             except Exception as e:
-                results.append(
+                services_summary.append(
                     {
-                        "label": p["label"],
-                        "url": p["url"],
+                        "service": svc,
+                        "url": url,
                         "status": None,
-                        "snippet": f"{type(e).__name__}: {str(e)[:300]}",
+                        "method_count": 0,
+                        "methods": [],
+                        "error": f"{type(e).__name__}: {str(e)[:200]}",
                     }
                 )
-    return {"probes": results}
+
+    # Also re-confirm the known-good GetLegislation call still works.
+    known_good: dict = {}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            resp = await client.get(
+                f"{base}/LegislationService.asmx/GetLegislation",
+                params={"biennium": biennium, "billNumber": bill_number},
+                headers=headers_default,
+            )
+            known_good = {
+                "status": resp.status_code,
+                "snippet": resp.text[:500],
+            }
+        except Exception as e:
+            known_good = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+    return {
+        "biennium": biennium,
+        "services": services_summary,
+        "known_good_GetLegislation": known_good,
+    }
 
 
 @app.get("/admin/backfill-bill")
