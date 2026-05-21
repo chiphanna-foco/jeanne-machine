@@ -570,6 +570,138 @@ async def _run_enrich_task(
     }
 
 
+@app.get("/admin/drain-enrich")
+async def drain_enrich(
+    source: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    batch_size: int = Query(default=500, le=500),
+    max_batches: int = Query(default=30, le=100),
+    min_confidence: float = Query(default=0.5),
+    token: str | None = Query(default=None),
+):
+    """Run repeated enrichment batches until the queue is empty (or max_batches hit).
+
+    One curl, walks away, comes back. Internally loops `/admin/run-enrich`
+    semantics until a batch returns zero docs. Useful for backfilling a
+    specific source/state without hand-curling the same call 10+ times.
+
+    Usage:
+      /admin/drain-enrich?source=wa_leg&state=WA&token=YOUR_TOKEN
+
+    Filters match /admin/run-enrich. Status is reported via
+    /admin/pipeline-status — `last_result.batches_run`, `total_enriched`,
+    `total_irrelevant`.
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    asyncio.create_task(
+        _run_drain_task(source, state, batch_size, max_batches, min_confidence)
+    )
+    return {
+        "status": "started",
+        "message": (
+            f"Drain started: source={source}, state={state}, "
+            f"batch_size={batch_size}, max_batches={max_batches}. "
+            "Check /admin/pipeline-status for progress."
+        ),
+    }
+
+
+async def _run_drain_task(
+    source: str | None,
+    state: str | None,
+    batch_size: int,
+    max_batches: int,
+    min_confidence: float,
+):
+    global _pipeline_status
+    _pipeline_status = {
+        "running": True,
+        "last_run": datetime.utcnow().isoformat(),
+        "last_result": None,
+    }
+
+    totals = {
+        "batches_run": 0,
+        "total_enriched": 0,
+        "total_irrelevant": 0,
+        "errors": [],
+        "stopped_reason": None,
+    }
+
+    try:
+        from enrichment.pipeline import enrich_document
+        from storage.models import SourceAdapter
+
+        original_threshold = settings.relevance_confidence_threshold
+        settings.relevance_confidence_threshold = min_confidence
+
+        for batch_num in range(1, max_batches + 1):
+            async with async_session() as session:
+                subquery = select(PolicyItem.raw_document_id)
+                query = select(RawDocument.id).where(RawDocument.id.notin_(subquery))
+                if source:
+                    query = query.join(
+                        SourceAdapter, RawDocument.source_adapter_id == SourceAdapter.id
+                    ).where(SourceAdapter.name == source)
+                if state:
+                    query = query.join(
+                        Jurisdiction, RawDocument.jurisdiction_id == Jurisdiction.id
+                    ).where(Jurisdiction.state_code == state.upper())
+                query = query.order_by(RawDocument.fetched_at.desc()).limit(batch_size)
+                result = await session.execute(query)
+                raw_ids = list(result.scalars().all())
+
+            if not raw_ids:
+                totals["stopped_reason"] = "queue empty"
+                break
+
+            batch_enriched = 0
+            batch_irrelevant = 0
+            for raw_id in raw_ids:
+                try:
+                    async with async_session() as session:
+                        raw = await session.get(RawDocument, raw_id)
+                        if not raw:
+                            continue
+                        item = await enrich_document(session, raw)
+                        if item:
+                            batch_enriched += 1
+                        else:
+                            batch_irrelevant += 1
+                        await session.commit()
+                except Exception as e:
+                    totals["errors"].append(
+                        f"batch {batch_num} raw_id={raw_id}: {type(e).__name__}: {str(e)[:200]}"
+                    )
+
+            totals["batches_run"] = batch_num
+            totals["total_enriched"] += batch_enriched
+            totals["total_irrelevant"] += batch_irrelevant
+            logger.info(
+                f"drain batch {batch_num}: enriched={batch_enriched}, "
+                f"irrelevant={batch_irrelevant}"
+            )
+            # Reflect progress between batches so polling shows live counts
+            _pipeline_status["last_result"] = dict(totals)
+
+        if totals["stopped_reason"] is None:
+            totals["stopped_reason"] = f"max_batches={max_batches} reached"
+
+        settings.relevance_confidence_threshold = original_threshold
+
+    except Exception as e:
+        totals["errors"].append(f"drain error: {type(e).__name__}: {str(e)[:300]}")
+        logger.error(f"Drain failed: {e}", exc_info=True)
+
+    _pipeline_status = {
+        "running": False,
+        "last_run": datetime.utcnow().isoformat(),
+        "last_result": totals,
+    }
+
+
 @app.get("/admin/db-stats")
 async def db_stats(
     token: str | None = Query(default=None),
