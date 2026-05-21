@@ -721,6 +721,7 @@ async def wsl_probe(
 
     # Also re-confirm the known-good GetLegislation call still works.
     known_good: dict = {}
+    list_call: dict = {}
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             resp = await client.get(
@@ -735,10 +736,44 @@ async def wsl_probe(
         except Exception as e:
             known_good = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
 
+        # Try the bulk-list method wa_leg uses, with several since-date formats
+        # so we can see which one returns non-zero results.
+        list_variants = [
+            ("sinceDate=2025-01-01", {"biennium": biennium, "sinceDate": "2025-01-01"}),
+            ("sinceDate=2024-01-01", {"biennium": biennium, "sinceDate": "2024-01-01"}),
+            ("sinceDate=2025-01-01T00:00:00", {"biennium": biennium, "sinceDate": "2025-01-01T00:00:00"}),
+            ("SinceDate=2025-01-01 (PascalCase)", {"biennium": biennium, "SinceDate": "2025-01-01"}),
+        ]
+        list_call = {"variants": []}
+        for label, params in list_variants:
+            try:
+                resp = await client.get(
+                    f"{base}/LegislationService.asmx/GetLegislationInfoIntroducedSince",
+                    params=params,
+                    headers=headers_default,
+                )
+                list_call["variants"].append(
+                    {
+                        "label": label,
+                        "url": str(resp.request.url),
+                        "status": resp.status_code,
+                        "snippet": resp.text[:1500],
+                    }
+                )
+            except Exception as e:
+                list_call["variants"].append(
+                    {
+                        "label": label,
+                        "status": None,
+                        "error": f"{type(e).__name__}: {str(e)[:200]}",
+                    }
+                )
+
     return {
         "biennium": biennium,
         "services": services_summary,
         "known_good_GetLegislation": known_good,
+        "GetLegislationInfoIntroducedSince": list_call,
     }
 
 
