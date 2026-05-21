@@ -701,6 +701,30 @@ async def _run_drain_task(
         "last_result": totals,
     }
 
+    # Slack ping so the user doesn't have to poll pipeline-status
+    if settings.slack_webhook_url:
+        try:
+            from digest.slack import send_to_slack
+
+            filters = []
+            if source:
+                filters.append(f"source={source}")
+            if state:
+                filters.append(f"state={state.upper()}")
+            filter_str = " ".join(filters) if filters else "no filters"
+            err_str = f", {len(totals['errors'])} errors" if totals["errors"] else ""
+            text = (
+                f"*Drain done* ({filter_str}): "
+                f"{totals['total_enriched']} enriched, "
+                f"{totals['total_irrelevant']} irrelevant, "
+                f"{totals['batches_run']} batches{err_str}. "
+                f"Stopped: {totals['stopped_reason']}."
+            )
+            blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+            await send_to_slack(settings.slack_webhook_url, blocks, fallback_text=text)
+        except Exception as e:
+            logger.error(f"Slack notify after drain failed: {e}")
+
 
 @app.get("/admin/db-stats")
 async def db_stats(
