@@ -105,6 +105,10 @@ async def enrich_document(session: AsyncSession, raw: RawDocument) -> PolicyItem
 
     # Stage 1: Classify relevance (Haiku — cheap and fast)
     classification = await classify_document(text)
+    # Mark the doc classified BEFORE returning, so the next queue scan skips
+    # it whether the classifier said yes or no. The caller commits the
+    # session, which persists this even on the no-policy-item path.
+    raw.classified_at = datetime.utcnow()
     if not classification["relevant"] or classification["confidence"] < settings.relevance_confidence_threshold:
         logger.info(
             f"Irrelevant (conf={classification['confidence']:.2f}): {raw.external_id}"

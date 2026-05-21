@@ -60,6 +60,10 @@ class RawDocument(Base):
     url: Mapped[str | None] = mapped_column(Text)
     raw_s3_key: Mapped[str | None] = mapped_column(Text)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Set by enrichment.pipeline.enrich_document after the classifier runs,
+    # regardless of verdict. Used to exclude already-classified docs from
+    # the enrichment queue so rejected docs don't get re-processed forever.
+    classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     content_hash: Mapped[str | None] = mapped_column(Text)
     raw_text: Mapped[str | None] = mapped_column(Text)
 
