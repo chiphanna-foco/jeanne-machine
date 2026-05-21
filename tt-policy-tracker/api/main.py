@@ -27,6 +27,24 @@ async def lifespan(app: FastAPI):
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             conn.commit()
         Base.metadata.create_all(sync_engine)
+        # Idempotent column-level migrations for changes Base.metadata.create_all
+        # won't apply to existing tables.
+        with sync_engine.connect() as conn:
+            conn.execute(text(
+                "ALTER TABLE raw_document "
+                "ADD COLUMN IF NOT EXISTS classified_at TIMESTAMPTZ"
+            ))
+            # Backfill: any raw_document that already has a policy_item was
+            # successfully classified at some point. Mark it so we don't re-
+            # classify it. Rejected docs we never tracked will get one final
+            # re-classification pass (and then be permanently marked).
+            conn.execute(text(
+                "UPDATE raw_document "
+                "SET classified_at = COALESCE(classified_at, CURRENT_TIMESTAMP) "
+                "WHERE id IN (SELECT raw_document_id FROM policy_item) "
+                "AND classified_at IS NULL"
+            ))
+            conn.commit()
         sync_engine.dispose()
         logger.info("Database tables ready")
     except Exception as e:
@@ -396,10 +414,9 @@ async def _run_pipeline_task(
         # ── Step 2: Enrich ──
         # First fetch the list of raw docs to process (in its own session)
         async with async_session() as session:
-            subquery = select(PolicyItem.raw_document_id)
             query = (
                 select(RawDocument.id)
-                .where(RawDocument.id.notin_(subquery))
+                .where(RawDocument.classified_at.is_(None))
                 .order_by(RawDocument.fetched_at.desc())
                 .limit(batch_size)
             )
@@ -525,8 +542,7 @@ async def _run_enrich_task(
         settings.relevance_confidence_threshold = min_confidence
 
         async with async_session() as session:
-            subquery = select(PolicyItem.raw_document_id)
-            query = select(RawDocument.id).where(RawDocument.id.notin_(subquery))
+            query = select(RawDocument.id).where(RawDocument.classified_at.is_(None))
             if source:
                 query = query.join(
                     SourceAdapter, RawDocument.source_adapter_id == SourceAdapter.id
@@ -639,8 +655,7 @@ async def _run_drain_task(
 
         for batch_num in range(1, max_batches + 1):
             async with async_session() as session:
-                subquery = select(PolicyItem.raw_document_id)
-                query = select(RawDocument.id).where(RawDocument.id.notin_(subquery))
+                query = select(RawDocument.id).where(RawDocument.classified_at.is_(None))
                 if source:
                     query = query.join(
                         SourceAdapter, RawDocument.source_adapter_id == SourceAdapter.id
@@ -738,10 +753,9 @@ async def db_stats(
     total_raw = (await session.execute(select(func.count(RawDocument.id)))).scalar() or 0
     total_enriched = (await session.execute(select(func.count(PolicyItem.id)))).scalar() or 0
 
-    # Count un-enriched (raw docs without a policy item)
-    subquery = select(PolicyItem.raw_document_id)
+    # Count un-classified (raw docs the classifier hasn't seen yet)
     unenriched = (await session.execute(
-        select(func.count(RawDocument.id)).where(RawDocument.id.notin_(subquery))
+        select(func.count(RawDocument.id)).where(RawDocument.classified_at.is_(None))
     )).scalar() or 0
 
     # Sample some raw doc titles to see what we're getting
@@ -1521,10 +1535,9 @@ async def _run_weekly_full_task():
 
         # Enrich the new docs (per-item commit)
         async with async_session() as session:
-            subquery = select(PolicyItem.raw_document_id)
             query = (
                 select(RawDocument.id)
-                .where(RawDocument.id.notin_(subquery))
+                .where(RawDocument.classified_at.is_(None))
                 .order_by(RawDocument.fetched_at.desc())
                 .limit(500)
             )
