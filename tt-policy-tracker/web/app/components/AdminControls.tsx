@@ -104,6 +104,22 @@ const ACTIONS: Action[] = [
     icon: "📊",
     view: true,
   },
+  {
+    key: "inspect-ca-cpi",
+    label: "Inspect CA CPI Source",
+    description: "Show the raw text of the CA DIR CCPI PDF (for building the parser).",
+    path: "/admin/fetch-probe?url=https://www.dir.ca.gov/oprl/CPI/PresentCCPIchange.PDF",
+    icon: "🔍",
+    view: true,
+  },
+  {
+    key: "inspect-or-cpi",
+    label: "Inspect Oregon CPI Source",
+    description: "Show the raw text of the Oregon OEA rent-stabilization page.",
+    path: "/admin/fetch-probe?url=https://www.oregon.gov/das/oea/pages/rent-stabilization.aspx",
+    icon: "🔍",
+    view: true,
+  },
 ];
 
 function formatTimestamp(iso: string | null): string {
