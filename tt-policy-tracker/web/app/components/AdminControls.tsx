@@ -16,6 +16,9 @@ interface Action {
   path: string;
   confirmText?: string;
   icon: string;
+  // Read-only data endpoints: show the JSON response inline instead of a
+  // "started" message, and stay enabled even while a pipeline is running.
+  view?: boolean;
 }
 
 const ACTIONS: Action[] = [
@@ -61,6 +64,45 @@ const ACTIONS: Action[] = [
     description: "Create AI-written blog drafts from high-impact items.",
     path: "/admin/generate-drafts?min_impact=high&max_drafts=5",
     icon: "✍️",
+  },
+  {
+    key: "drain",
+    label: "Drain Enrichment Backlog",
+    description: "Classify every un-processed doc until the queue is empty. Slack-pings when done.",
+    path: "/admin/drain-enrich?batch_size=500",
+    confirmText: "This classifies the entire backlog (can take a while + Haiku API cost). Continue?",
+    icon: "🚰",
+  },
+  {
+    key: "backfill-wa",
+    label: "Backfill Washington",
+    description: "Pull all WA bills (180 days) direct from WSL. ~20 min, then enrich.",
+    path: "/admin/run-pipeline?days_back=180&state=wa&batch_size=10",
+    confirmText: "Pulls every WA bill from the last 180 days direct from WSL (~20 min). Continue?",
+    icon: "🏛️",
+  },
+  {
+    key: "refresh-cpi",
+    label: "Refresh CPI Data",
+    description: "Pull latest CPI-U from BLS for CA + Oregon rent caps. Slack-pings when done.",
+    path: "/admin/refresh-cpi",
+    icon: "📈",
+  },
+  {
+    key: "view-cpi",
+    label: "View CPI + Rent Caps",
+    description: "Current CPI readings and computed CA/OR rent caps.",
+    path: "/api/cpi",
+    icon: "🧮",
+    view: true,
+  },
+  {
+    key: "view-stats",
+    label: "View Per-State Counts",
+    description: "Raw + enriched document counts by state.",
+    path: "/admin/stats-by-state",
+    icon: "📊",
+    view: true,
   },
 ];
 
@@ -117,7 +159,11 @@ export function AdminControls() {
       const resp = await fetch(appendToken(action.path, getStoredPassword()));
       const data = await resp.json();
       if (resp.ok) {
-        setMessage(`${action.label}: ${data.message || "Started"}`);
+        if (action.view) {
+          setMessage(`${action.label}:\n${JSON.stringify(data, null, 2)}`);
+        } else {
+          setMessage(`${action.label}: ${data.message || "Started"}`);
+        }
       } else if (resp.status === 403) {
         setMessage(`Auth rejected. Reload the page and re-enter the password.`);
       } else {
@@ -290,6 +336,11 @@ export function AdminControls() {
             fontSize: 12,
             marginBottom: 12,
             lineHeight: 1.5,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            maxHeight: 240,
+            overflowY: "auto",
+            fontFamily: message.includes("{") ? "var(--font-mono)" : "inherit",
           }}
         >
           {message}
@@ -301,22 +352,22 @@ export function AdminControls() {
           <button
             key={action.key}
             onClick={() => trigger(action)}
-            disabled={busy || running}
+            disabled={busy || (!!running && !action.view)}
             style={{
               textAlign: "left",
               padding: "10px 12px",
               background: "#fff",
               border: "1px solid var(--color-border)",
               borderRadius: 10,
-              cursor: busy || running ? "not-allowed" : "pointer",
-              opacity: busy || running ? 0.4 : 1,
+              cursor: busy || (running && !action.view) ? "not-allowed" : "pointer",
+              opacity: busy || (running && !action.view) ? 0.4 : 1,
               display: "flex",
               alignItems: "center",
               gap: 10,
               transition: "background 160ms ease, border-color 160ms ease",
             }}
             onMouseEnter={(e) => {
-              if (busy || running) return;
+              if (busy || (running && !action.view)) return;
               e.currentTarget.style.background = "#f8fafc";
               e.currentTarget.style.borderColor = "var(--color-primary)";
             }}
