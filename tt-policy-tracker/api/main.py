@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import case, create_engine, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -16,6 +16,22 @@ from storage.database import async_session, get_session
 from storage.models import Base, Jurisdiction, LawSnapshot, PolicyItem, RawDocument, Subscription
 
 logger = logging.getLogger(__name__)
+
+STATE_NAMES = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+    "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+    "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+    "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+    "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+    "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+    "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+    "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+    "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+    "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+}
 
 
 @asynccontextmanager
@@ -1632,6 +1648,108 @@ async def laws_matrix(session: AsyncSession = Depends(get_session)):
         "topics": TOPICS,
         "topic_labels": TOPIC_LABELS,
         "jurisdictions": matrix,
+    }
+
+
+@app.get("/api/states")
+async def list_states(session: AsyncSession = Depends(get_session)):
+    """States that have policy items — index for the per-state guides."""
+    item_q = (
+        select(Jurisdiction.state_code, func.count(PolicyItem.id))
+        .join(PolicyItem, PolicyItem.jurisdiction_id == Jurisdiction.id)
+        .where(Jurisdiction.state_code.isnot(None))
+        .group_by(Jurisdiction.state_code)
+    )
+    item_counts = {r[0]: r[1] for r in (await session.execute(item_q)).all()}
+
+    law_q = (
+        select(Jurisdiction.state_code, func.count(LawSnapshot.id))
+        .join(LawSnapshot, LawSnapshot.jurisdiction_id == Jurisdiction.id)
+        .where(Jurisdiction.state_code.isnot(None))
+        .group_by(Jurisdiction.state_code)
+    )
+    law_counts = {r[0]: r[1] for r in (await session.execute(law_q)).all()}
+
+    states = [
+        {
+            "state_code": code,
+            "name": STATE_NAMES.get(code, code),
+            "item_count": count,
+            "law_topic_count": law_counts.get(code, 0),
+        }
+        for code, count in item_counts.items()
+    ]
+    states.sort(key=lambda s: s["item_count"], reverse=True)
+    return {"states": states}
+
+
+@app.get("/api/states/{state}")
+async def state_guide(state: str, session: AsyncSession = Depends(get_session)):
+    """Per-state renter-protection guide: AI law summaries + top policy items.
+
+    The quick resource: what to know about a state's landlord-tenant laws,
+    each item linking out to its official source.
+    """
+    from enrichment.law_synthesizer import TOPIC_LABELS
+
+    code = state.upper()
+
+    snap_q = (
+        select(LawSnapshot)
+        .join(Jurisdiction, LawSnapshot.jurisdiction_id == Jurisdiction.id)
+        .where(Jurisdiction.state_code == code)
+        .order_by(LawSnapshot.topic)
+    )
+    snapshots = list((await session.execute(snap_q)).scalars().all())
+
+    # Top items: high-impact first, then most recent.
+    impact_rank = case(
+        (PolicyItem.impact_score == "high", 3),
+        (PolicyItem.impact_score == "med", 2),
+        (PolicyItem.impact_score == "low", 1),
+        else_=0,
+    )
+    item_q = (
+        select(PolicyItem)
+        .join(Jurisdiction, PolicyItem.jurisdiction_id == Jurisdiction.id)
+        .where(Jurisdiction.state_code == code)
+        .order_by(impact_rank.desc(), PolicyItem.discovered_at.desc())
+        .limit(25)
+    )
+    items = list((await session.execute(item_q)).scalars().all())
+
+    return {
+        "state_code": code,
+        "name": STATE_NAMES.get(code, code),
+        "topic_labels": TOPIC_LABELS,
+        "law_snapshots": [
+            {
+                "id": s.id,
+                "topic": s.topic,
+                "headline": s.headline,
+                "summary": s.summary,
+                "key_facts": s.key_facts,
+                "statutory_references": s.statutory_references,
+                "confidence": s.confidence,
+                "caveats": s.caveats,
+                "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+            }
+            for s in snapshots
+        ],
+        "top_items": [
+            {
+                "id": it.id,
+                "title": it.title,
+                "summary": it.summary,
+                "impact_score": it.impact_score,
+                "action_needed": it.action_needed,
+                "topics": it.topic_tags,
+                "source_url": it.source_url,
+                "effective_date": it.effective_date.isoformat() if it.effective_date else None,
+                "discovered_at": it.discovered_at.isoformat() if it.discovered_at else None,
+            }
+            for it in items
+        ],
     }
 
 

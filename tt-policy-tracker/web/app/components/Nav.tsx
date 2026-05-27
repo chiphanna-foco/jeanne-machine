@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 
 const NAV_ITEMS = [
   { href: "/", label: "Policy Feed", emoji: "📋" },
+  { href: "/states", label: "By State", emoji: "🗺️" },
   { href: "/laws", label: "Current Laws", emoji: "⚖️" },
   { href: "/drafts", label: "Content Drafts", emoji: "✍️" },
 ];
