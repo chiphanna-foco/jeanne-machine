@@ -203,6 +203,7 @@ def compute_rent_caps(latest_by_series: dict[str, dict]) -> list[dict]:
                 cap = min(OREGON_BASE_PCT + cpi_change, OREGON_MAX_PCT)
                 caps.append({
                     "program": "Oregon SB 608/611",
+                    "state_code": "OR",
                     "area": area,
                     "cpi_change_pct": cpi_change,
                     "cap_pct": round(cap, 2),
@@ -212,6 +213,7 @@ def compute_rent_caps(latest_by_series: dict[str, dict]) -> list[dict]:
                 cap = min(CA_AB1482_BASE_PCT + cpi_change, CA_AB1482_MAX_PCT)
                 caps.append({
                     "program": "California AB 1482",
+                    "state_code": "CA",
                     "area": area,
                     "cpi_change_pct": cpi_change,
                     "cap_pct": round(cap, 2),
