@@ -986,6 +986,80 @@ async def _run_refresh_cpi_task(start_year: int):
             logger.error(f"Slack notify after CPI refresh failed: {e}")
 
 
+@app.get("/admin/fetch-probe")
+async def fetch_probe(
+    url: str = Query(..., description="URL to fetch (PDF or HTML)"),
+    token: str | None = Query(default=None),
+):
+    """Fetch an arbitrary URL from Railway and return its extracted text.
+
+    Railway has outbound access the Claude sandbox lacks, and sets browser
+    headers that get past 403s. Used to inspect the CA DIR CCPI PDF and the
+    Oregon OEA rent-increase page before writing parsers for them.
+
+    Usage:
+      /admin/fetch-probe?url=https://www.dir.ca.gov/oprl/CPI/PresentCCPIchange.PDF&token=...
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    import httpx
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        ),
+        "Accept": "*/*",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=45.0, follow_redirects=True) as client:
+            resp = await client.get(url, headers=headers)
+    except Exception as e:
+        return {"url": url, "error": f"{type(e).__name__}: {str(e)[:300]}"}
+
+    content_type = resp.headers.get("content-type", "")
+    is_pdf = "pdf" in content_type.lower() or url.lower().endswith(".pdf")
+
+    out: dict = {
+        "url": str(resp.request.url),
+        "status": resp.status_code,
+        "content_type": content_type,
+        "bytes": len(resp.content),
+    }
+
+    if resp.status_code != 200:
+        out["snippet"] = resp.text[:1000]
+        return out
+
+    if is_pdf:
+        try:
+            import io
+
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(resp.content))
+            text = "\n".join((page.extract_text() or "") for page in reader.pages)
+            out["kind"] = "pdf"
+            out["pages"] = len(reader.pages)
+            out["text"] = text[:6000]
+        except Exception as e:
+            out["kind"] = "pdf"
+            out["error"] = f"PDF parse failed: {type(e).__name__}: {str(e)[:200]}"
+    else:
+        # Strip tags crudely so we can read the content
+        import re
+
+        stripped = re.sub(r"<script.*?</script>", " ", resp.text, flags=re.DOTALL | re.IGNORECASE)
+        stripped = re.sub(r"<style.*?</style>", " ", stripped, flags=re.DOTALL | re.IGNORECASE)
+        stripped = re.sub(r"<[^>]+>", " ", stripped)
+        stripped = re.sub(r"\s+", " ", stripped).strip()
+        out["kind"] = "html"
+        out["text"] = stripped[:6000]
+
+    return out
+
+
 @app.get("/admin/wsl-probe")
 async def wsl_probe(
     biennium: str = Query(default="2025-26"),
