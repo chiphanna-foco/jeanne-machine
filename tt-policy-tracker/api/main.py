@@ -357,6 +357,7 @@ async def _run_pipeline_task(
 
     try:
         # ── Step 1: Ingest ──
+        from adapters.bls_cpi import BlsCpiAdapter
         from adapters.congress import CongressAdapter
         from adapters.courtlistener import CourtListenerAdapter
         from adapters.federal_register import FederalRegisterAdapter
@@ -379,6 +380,7 @@ async def _run_pipeline_task(
             adapters = [
                 OpenStatesAdapter(states=os_states),
                 WaLegAdapter(),
+                BlsCpiAdapter(),
                 CongressAdapter(),
                 FederalRegisterAdapter(),
                 LegistarAdapter(),
@@ -813,6 +815,175 @@ async def stats_by_state(
     ]
     rows.sort(key=lambda r: r["raw"], reverse=True)
     return {"states": rows}
+
+
+@app.get("/api/cpi")
+async def get_cpi(session: AsyncSession = Depends(get_session)):
+    """Latest CPI-U readings per series + computed rent caps.
+
+    Structured output for Autopilot to consume. Rent caps are computed from
+    the stored CPI readings using each program's documented formula.
+    """
+    from adapters.bls_cpi import CPI_SERIES, compute_rent_caps
+    from storage.models import CpiReading
+
+    latest_by_series: dict[str, dict] = {}
+    readings_out: list[dict] = []
+    for sid in CPI_SERIES:
+        # Latest monthly reading (exclude M13 annual-average rows)
+        row = (
+            await session.execute(
+                select(CpiReading)
+                .where(CpiReading.series_id == sid, CpiReading.period != "M13")
+                .order_by(CpiReading.year.desc(), CpiReading.period.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+        if not row:
+            continue
+        prior = (
+            await session.execute(
+                select(CpiReading).where(
+                    CpiReading.series_id == sid,
+                    CpiReading.year == row.year - 1,
+                    CpiReading.period == row.period,
+                )
+            )
+        ).scalars().first()
+        yoy = (
+            round((row.value - prior.value) / prior.value * 100, 2)
+            if prior and prior.value
+            else None
+        )
+        latest_by_series[sid] = {"value": row.value, "yoy_change_pct": yoy}
+        readings_out.append(
+            {
+                "series_id": sid,
+                "area": row.area_name,
+                "period": f"{row.period_name or row.period} {row.year}",
+                "value": row.value,
+                "yoy_change_pct": yoy,
+            }
+        )
+
+    return {"readings": readings_out, "rent_caps": compute_rent_caps(latest_by_series)}
+
+
+@app.get("/admin/refresh-cpi")
+async def refresh_cpi(
+    start_year: int = Query(default=0),
+    token: str | None = Query(default=None),
+):
+    """Fetch CPI-U series from BLS, store readings, and ingest as policy docs.
+
+    One curl, walks away, Slack-pings on completion.
+    Usage: /admin/refresh-cpi?token=YOUR_TOKEN
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    asyncio.create_task(_run_refresh_cpi_task(start_year))
+    return {
+        "status": "started",
+        "message": "CPI refresh started. Check /admin/pipeline-status or wait for Slack.",
+    }
+
+
+async def _run_refresh_cpi_task(start_year: int):
+    global _pipeline_status
+    _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
+
+    from adapters.bls_cpi import BlsCpiAdapter
+    from enrichment.pipeline import ingest_raw_doc
+    from storage.models import CpiReading
+
+    end_year = datetime.utcnow().year
+    if not start_year:
+        start_year = end_year - 2
+
+    results = {
+        "readings_stored": 0,
+        "readings_skipped": 0,
+        "ingested": 0,
+        "by_series": {},
+        "errors": [],
+    }
+
+    try:
+        adapter = BlsCpiAdapter()
+        series_map = await adapter.fetch_readings(start_year, end_year)
+        results["by_series"] = adapter.last_run_stats
+
+        # Store structured readings (dedup by series_id + year + period)
+        async with async_session() as session:
+            for readings in series_map.values():
+                for r in readings:
+                    exists = (
+                        await session.execute(
+                            select(CpiReading).where(
+                                CpiReading.series_id == r["series_id"],
+                                CpiReading.year == r["year"],
+                                CpiReading.period == r["period"],
+                            )
+                        )
+                    ).scalars().first()
+                    if exists:
+                        results["readings_skipped"] += 1
+                        continue
+                    session.add(
+                        CpiReading(
+                            series_id=r["series_id"],
+                            area_name=r["area_name"],
+                            year=r["year"],
+                            period=r["period"],
+                            period_name=r.get("period_name"),
+                            value=r["value"],
+                        )
+                    )
+                    results["readings_stored"] += 1
+            await session.commit()
+
+        # Build RawDocs from the same fetch (no second BLS call) and ingest
+        docs = []
+        for readings in series_map.values():
+            if not readings:
+                continue
+            latest = readings[0]
+            yoy = BlsCpiAdapter._yoy_change(readings, latest)
+            doc = adapter._normalize(latest, yoy)
+            if doc:
+                docs.append(doc)
+        async with async_session() as session:
+            for doc in docs:
+                raw = await ingest_raw_doc(session, doc)
+                if raw:
+                    results["ingested"] += 1
+            await session.commit()
+
+    except Exception as e:
+        results["errors"].append(f"{type(e).__name__}: {str(e)[:300]}")
+        logger.error(f"CPI refresh failed: {e}", exc_info=True)
+
+    _pipeline_status = {
+        "running": False,
+        "last_run": datetime.utcnow().isoformat(),
+        "last_result": results,
+    }
+
+    if settings.slack_webhook_url:
+        try:
+            from digest.slack import send_to_slack
+
+            err = f", {len(results['errors'])} errors" if results["errors"] else ""
+            text = (
+                f"*CPI refresh done*: {results['readings_stored']} new readings stored, "
+                f"{results['readings_skipped']} already had, {results['ingested']} ingested{err}. "
+                f"See /api/cpi for current rent caps."
+            )
+            blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+            await send_to_slack(settings.slack_webhook_url, blocks, fallback_text=text)
+        except Exception as e:
+            logger.error(f"Slack notify after CPI refresh failed: {e}")
 
 
 @app.get("/admin/wsl-probe")

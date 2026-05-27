@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # CourtListener — free API token from courtlistener.com
     courtlistener_api_token: str = ""
 
+    # BLS — optional registration key from data.bls.gov (raises daily query
+    # limit from 25 to 500). Works without a key at the lower limit.
+    bls_api_key: str = ""
+
     # Open States scope — "phase0" (OH + CO only) or "all" (all 50 states)
     openstates_scope: str = "all"
 

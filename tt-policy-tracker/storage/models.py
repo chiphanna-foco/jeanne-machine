@@ -211,3 +211,28 @@ class ContentDraft(Base):
     )
 
     policy_item: Mapped["PolicyItem"] = relationship()
+
+
+class CpiReading(Base):
+    """A single CPI-U index reading from BLS, used to drive rent-cap math.
+
+    California (AB 1482) and Oregon (SB 608/611) cap allowable rent increases
+    at a fixed percentage plus the regional CPI change. We store the raw BLS
+    index values here so the rent caps can be recomputed and Autopilot can
+    read structured numbers.
+    """
+
+    __tablename__ = "cpi_reading"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    series_id: Mapped[str] = mapped_column(Text, nullable=False)
+    area_name: Mapped[str] = mapped_column(Text, nullable=False)
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    # BLS period code: M01-M12 monthly, M13 = annual average
+    period: Mapped[str] = mapped_column(Text, nullable=False)
+    period_name: Mapped[str | None] = mapped_column(Text)
+    value: Mapped[float] = mapped_column(nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
