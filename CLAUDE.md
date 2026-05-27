@@ -16,6 +16,8 @@ The user is busy and shouldn't have to hand-curl admin endpoints in a loop. Buil
 
 5. **Default verbose, opt out for terse.** Status endpoints should return per-state / per-source breakdowns by default. Don't make the user run three different curls to assemble a picture.
 
+6. **Every new admin workflow gets a dashboard button.** When you add an `/admin/*` action, also add it to `web/app/components/AdminControls.tsx` (the ⚙️ Admin panel on jeanne-machine.vercel.app). Read-only data endpoints get a `view: true` action that renders the JSON inline. The user prefers clicking to curling — a curl-only endpoint is half-finished. `next.config.ts` already proxies `/api/*` and `/admin/*` to the backend, so no routing work is needed.
+
 ## Sandbox limits Claude has to work around
 
 - **No outbound HTTP to Railway.** `jeanne-machine.up.railway.app` is not in the curl allowlist for the Claude sandbox. Claude **cannot** invoke admin endpoints itself — only the user can. Build endpoints that need zero follow-up, not endpoints that need Claude to babysit them.
