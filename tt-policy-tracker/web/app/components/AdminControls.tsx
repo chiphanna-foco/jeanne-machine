@@ -9,6 +9,12 @@ interface PipelineStatus {
   last_result: Record<string, unknown> | null;
 }
 
+interface DbStats {
+  total_raw_documents: number;
+  total_enriched_items: number;
+  unenriched_remaining: number;
+}
+
 interface Action {
   key: string;
   label: string;
@@ -145,6 +151,7 @@ function appendToken(path: string, token: string): string {
 export function AdminControls() {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<PipelineStatus | null>(null);
+  const [dbStats, setDbStats] = useState<DbStats | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -160,10 +167,25 @@ export function AdminControls() {
     }
   };
 
+  const fetchDbStats = async () => {
+    try {
+      const resp = await fetch(appendToken("/admin/db-stats", getStoredPassword()));
+      if (resp.ok) {
+        setDbStats(await resp.json());
+      }
+    } catch {
+      // ignore
+    }
+  };
+
   useEffect(() => {
     if (!open) return;
     fetchStatus();
-    const interval = setInterval(fetchStatus, 4000);
+    fetchDbStats();
+    const interval = setInterval(() => {
+      fetchStatus();
+      fetchDbStats();
+    }, 4000);
     return () => clearInterval(interval);
   }, [open]);
 
@@ -190,6 +212,7 @@ export function AdminControls() {
     } finally {
       setBusy(false);
       fetchStatus();
+      fetchDbStats();
     }
   };
 
@@ -340,6 +363,51 @@ export function AdminControls() {
           </pre>
         )}
       </div>
+
+      {/* AI analysis progress */}
+      {dbStats && (() => {
+        const total = dbStats.total_raw_documents || 0;
+        const remaining = dbStats.unenriched_remaining || 0;
+        const analyzed = Math.max(total - remaining, 0);
+        const pct = total > 0 ? Math.round((analyzed / total) * 100) : 0;
+        return (
+          <div
+            style={{
+              background: "#f8fafc",
+              borderRadius: 10,
+              padding: "10px 14px",
+              marginBottom: 14,
+              border: "1px solid var(--color-border)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+              <span style={{ fontWeight: 700, fontSize: 11, color: "var(--color-text-muted)" }}>
+                AI Analysis Progress
+              </span>
+              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--color-primary)" }}>{pct}%</span>
+            </div>
+            <div style={{ height: 8, background: "#e2e8f0", borderRadius: 999, overflow: "hidden" }}>
+              <div
+                style={{
+                  width: `${pct}%`,
+                  height: "100%",
+                  background: "linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%)",
+                  borderRadius: 999,
+                  transition: "width 400ms ease",
+                }}
+              />
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 11, color: "var(--color-text-muted)" }}>
+              <span>
+                <strong style={{ color: "#b45309" }}>{remaining.toLocaleString()}</strong> awaiting analysis
+              </span>
+              <span>
+                {analyzed.toLocaleString()} analyzed · <strong>{(dbStats.total_enriched_items || 0).toLocaleString()}</strong> relevant
+              </span>
+            </div>
+          </div>
+        );
+      })()}
 
       {message && (
         <div
