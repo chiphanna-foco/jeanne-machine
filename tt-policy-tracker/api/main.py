@@ -609,35 +609,39 @@ async def drain_enrich(
     source: str | None = Query(default=None),
     state: str | None = Query(default=None),
     batch_size: int = Query(default=500, le=500),
-    max_batches: int = Query(default=30, le=100),
+    max_batches: int = Query(default=100, le=100),
     min_confidence: float = Query(default=0.5),
+    prefilter: bool = Query(default=True),
     token: str | None = Query(default=None),
 ):
     """Run repeated enrichment batches until the queue is empty (or max_batches hit).
 
     One curl, walks away, comes back. Internally loops `/admin/run-enrich`
-    semantics until a batch returns zero docs. Useful for backfilling a
-    specific source/state without hand-curling the same call 10+ times.
+    semantics until a batch returns zero docs.
 
     Usage:
       /admin/drain-enrich?source=wa_leg&state=WA&token=YOUR_TOKEN
 
-    Filters match /admin/run-enrich. Status is reported via
-    /admin/pipeline-status — `last_result.batches_run`, `total_enriched`,
-    `total_irrelevant`.
+    prefilter (default true): run a cheap local keyword check before Haiku.
+    Docs that mention no housing keyword are marked classified without an
+    API call — slashes cost/time on a big sweep. Set prefilter=false to
+    send every doc to Haiku.
+
+    Filters match /admin/run-enrich. Progress via /admin/pipeline-status:
+    batches_run, total_enriched, total_irrelevant, total_prefiltered.
     """
     if not _check_admin_token(token):
         return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
 
     asyncio.create_task(
-        _run_drain_task(source, state, batch_size, max_batches, min_confidence)
+        _run_drain_task(source, state, batch_size, max_batches, min_confidence, prefilter)
     )
     return {
         "status": "started",
         "message": (
             f"Drain started: source={source}, state={state}, "
-            f"batch_size={batch_size}, max_batches={max_batches}. "
-            "Check /admin/pipeline-status for progress."
+            f"batch_size={batch_size}, max_batches={max_batches}, "
+            f"prefilter={prefilter}. Check /admin/pipeline-status for progress."
         ),
     }
 
@@ -648,6 +652,7 @@ async def _run_drain_task(
     batch_size: int,
     max_batches: int,
     min_confidence: float,
+    prefilter: bool = True,
 ):
     global _pipeline_status
     _pipeline_status = {
@@ -660,11 +665,15 @@ async def _run_drain_task(
         "batches_run": 0,
         "total_enriched": 0,
         "total_irrelevant": 0,
+        "total_prefiltered": 0,
         "errors": [],
         "stopped_reason": None,
     }
 
     try:
+        from datetime import datetime as _dt
+
+        from enrichment.keywords import passes_keyword_prescreen
         from enrichment.pipeline import enrich_document
         from storage.models import SourceAdapter
 
@@ -692,11 +701,19 @@ async def _run_drain_task(
 
             batch_enriched = 0
             batch_irrelevant = 0
+            batch_prefiltered = 0
             for raw_id in raw_ids:
                 try:
                     async with async_session() as session:
                         raw = await session.get(RawDocument, raw_id)
                         if not raw:
+                            continue
+                        # Cheap keyword gate: skip Haiku for obviously off-topic
+                        # docs by marking them classified without an API call.
+                        if prefilter and not passes_keyword_prescreen(raw.raw_text or ""):
+                            raw.classified_at = _dt.utcnow()
+                            await session.commit()
+                            batch_prefiltered += 1
                             continue
                         item = await enrich_document(session, raw)
                         if item:
@@ -712,9 +729,10 @@ async def _run_drain_task(
             totals["batches_run"] = batch_num
             totals["total_enriched"] += batch_enriched
             totals["total_irrelevant"] += batch_irrelevant
+            totals["total_prefiltered"] += batch_prefiltered
             logger.info(
                 f"drain batch {batch_num}: enriched={batch_enriched}, "
-                f"irrelevant={batch_irrelevant}"
+                f"irrelevant={batch_irrelevant}, prefiltered={batch_prefiltered}"
             )
             # Reflect progress between batches so polling shows live counts
             _pipeline_status["last_result"] = dict(totals)
@@ -750,6 +768,7 @@ async def _run_drain_task(
                 f"*Drain done* ({filter_str}): "
                 f"{totals['total_enriched']} enriched, "
                 f"{totals['total_irrelevant']} irrelevant, "
+                f"{totals['total_prefiltered']} keyword-skipped, "
                 f"{totals['batches_run']} batches{err_str}. "
                 f"Stopped: {totals['stopped_reason']}."
             )

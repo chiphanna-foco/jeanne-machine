@@ -74,9 +74,9 @@ const ACTIONS: Action[] = [
   {
     key: "drain",
     label: "Drain Enrichment Backlog",
-    description: "Classify every un-processed doc until the queue is empty. Slack-pings when done.",
+    description: "Clear everything awaiting analysis. A keyword gate skips obvious non-housing docs before Haiku to save cost. Slack-pings when done.",
     path: "/admin/drain-enrich?batch_size=500",
-    confirmText: "This classifies the entire backlog (can take a while + Haiku API cost). Continue?",
+    confirmText: "This clears the entire analysis backlog. A keyword pre-filter avoids Haiku on off-topic docs, but housing docs still cost Haiku calls. Continue?",
     icon: "🚰",
   },
   {
