@@ -29,10 +29,20 @@ interface Item {
   effective_date: string | null;
 }
 
+interface RentCap {
+  program: string;
+  state_code: string;
+  area: string;
+  cpi_change_pct: number;
+  cap_pct: number;
+  formula: string;
+}
+
 interface Guide {
   state_code: string;
   name: string;
   topic_labels: Record<string, string>;
+  rent_caps?: RentCap[];
   law_snapshots: LawSnapshot[];
   top_items: Item[];
 }
@@ -109,6 +119,41 @@ export default function StateGuidePage() {
               Pull and analyze data for this state from the Admin panel, then check back.
             </div>
           </div>
+        )}
+
+        {/* CPI-driven rent cap banner (CA / OR) */}
+        {!loading && guide && guide.rent_caps && guide.rent_caps.length > 0 && (
+          <section style={{ marginBottom: 24 }}>
+            <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Current max rent increase
+            </h3>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
+              {guide.rent_caps.map((cap, i) => (
+                <div
+                  key={i}
+                  className="card"
+                  style={{
+                    padding: "16px 20px",
+                    background: "linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%)",
+                    border: "1px solid #a7f3d0",
+                  }}
+                >
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#047857", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                    {cap.area}
+                  </div>
+                  <div style={{ fontSize: 32, fontWeight: 800, color: "#065f46", lineHeight: 1.1, margin: "4px 0" }}>
+                    {cap.cap_pct}%
+                  </div>
+                  <div style={{ fontSize: 12, color: "#047857", lineHeight: 1.5 }}>
+                    {cap.program} · {cap.formula.replace("CPI", `${cap.cpi_change_pct}% CPI`)}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p style={{ fontSize: 11, color: "var(--color-text-subtle)", margin: "8px 2px 0", lineHeight: 1.5 }}>
+              Computed from the latest BLS CPI-U. Verify against the agency&apos;s officially published figure before relying on it.
+            </p>
+          </section>
         )}
 
         {/* AI law summaries */}

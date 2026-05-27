@@ -833,20 +833,14 @@ async def stats_by_state(
     return {"states": rows}
 
 
-@app.get("/api/cpi")
-async def get_cpi(session: AsyncSession = Depends(get_session)):
-    """Latest CPI-U readings per series + computed rent caps.
-
-    Structured output for Autopilot to consume. Rent caps are computed from
-    the stored CPI readings using each program's documented formula.
-    """
+async def _latest_cpi(session: AsyncSession) -> tuple[list[dict], list[dict]]:
+    """Return (readings, rent_caps) from the latest stored CPI per series."""
     from adapters.bls_cpi import CPI_SERIES, compute_rent_caps
     from storage.models import CpiReading
 
     latest_by_series: dict[str, dict] = {}
     readings_out: list[dict] = []
     for sid in CPI_SERIES:
-        # Latest monthly reading (exclude M13 annual-average rows)
         row = (
             await session.execute(
                 select(CpiReading)
@@ -881,8 +875,18 @@ async def get_cpi(session: AsyncSession = Depends(get_session)):
                 "yoy_change_pct": yoy,
             }
         )
+    return readings_out, compute_rent_caps(latest_by_series)
 
-    return {"readings": readings_out, "rent_caps": compute_rent_caps(latest_by_series)}
+
+@app.get("/api/cpi")
+async def get_cpi(session: AsyncSession = Depends(get_session)):
+    """Latest CPI-U readings per series + computed rent caps.
+
+    Structured output for Autopilot to consume. Rent caps are computed from
+    the stored CPI readings using each program's documented formula.
+    """
+    readings, rent_caps = await _latest_cpi(session)
+    return {"readings": readings, "rent_caps": rent_caps}
 
 
 @app.get("/admin/refresh-cpi")
@@ -1718,10 +1722,15 @@ async def state_guide(state: str, session: AsyncSession = Depends(get_session)):
     )
     items = list((await session.execute(item_q)).scalars().all())
 
+    # Rent caps tied to CPI (CA AB 1482, OR SB 608/611) for this state, if any.
+    _, all_caps = await _latest_cpi(session)
+    rent_caps = [c for c in all_caps if c.get("state_code") == code]
+
     return {
         "state_code": code,
         "name": STATE_NAMES.get(code, code),
         "topic_labels": TOPIC_LABELS,
+        "rent_caps": rent_caps,
         "law_snapshots": [
             {
                 "id": s.id,
