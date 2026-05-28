@@ -95,6 +95,22 @@ const ACTIONS: Action[] = [
     icon: "📈",
   },
   {
+    key: "effective-alerts",
+    label: "Send Effective-Date Alerts",
+    description: "Slack a heads-up about items taking effect in the next 90 days. Marks them so they're alerted once.",
+    path: "/admin/cron-effective-alerts",
+    confirmText: "This sends a Slack message and marks items as alerted. Use the preview button first to see what would go out. Continue?",
+    icon: "⏰",
+  },
+  {
+    key: "effective-preview",
+    label: "Preview Effective-Date Alerts",
+    description: "Dry-run: show items that would be alerted, without sending Slack or marking them.",
+    path: "/admin/cron-effective-alerts?dry_run=true",
+    icon: "🔍",
+    view: true,
+  },
+  {
     key: "view-cpi",
     label: "View CPI + Rent Caps",
     description: "Current CPI readings and computed CA/OR rent caps.",

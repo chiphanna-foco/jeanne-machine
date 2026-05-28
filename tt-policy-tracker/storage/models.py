@@ -95,6 +95,9 @@ class PolicyItem(Base):
     discovered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # Set when we've sent a Slack alert about this item's upcoming
+    # effective_date, so we don't re-alert on every daily cron pass.
+    effective_alert_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source_url: Mapped[str | None] = mapped_column(Text)
     topic_tags: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
     embedding = mapped_column(Vector(1536), nullable=True)

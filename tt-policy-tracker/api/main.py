@@ -60,6 +60,10 @@ async def lifespan(app: FastAPI):
                 "WHERE id IN (SELECT raw_document_id FROM policy_item) "
                 "AND classified_at IS NULL"
             ))
+            conn.execute(text(
+                "ALTER TABLE policy_item "
+                "ADD COLUMN IF NOT EXISTS effective_alert_sent_at TIMESTAMPTZ"
+            ))
             conn.commit()
         sync_engine.dispose()
         logger.info("Database tables ready")
@@ -1390,6 +1394,208 @@ async def cron_daily(token: str | None = Query(default=None)):
 
     asyncio.create_task(_run_pipeline_task(days_back=3, batch_size=300))
     return {"status": "started", "message": "Daily cron pipeline started (3 days back, 300 enrichment batch)."}
+
+
+@app.get("/admin/cron-effective-alerts")
+async def cron_effective_alerts(
+    lookahead_days: int = Query(default=90, ge=1, le=365),
+    dry_run: bool = Query(default=False),
+    token: str | None = Query(default=None),
+):
+    """Daily check: Slack a heads-up about items going into effect soon.
+
+    Finds policy items with effective_date within `lookahead_days` from now
+    that haven't been alerted yet, sends a single Slack message listing
+    them grouped by state, and marks them so we don't re-alert.
+
+    Defaults to a 90-day window — items typically surface 60-90 days out
+    on the daily cron pass.
+
+    Usage:
+      GET /admin/cron-effective-alerts?token=YOUR_TOKEN
+      GET /admin/cron-effective-alerts?lookahead_days=120&dry_run=true&token=...
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    if dry_run:
+        # Run synchronously so the preview returns the result inline (no
+        # need to round-trip through pipeline-status).
+        return await _collect_effective_alert_preview(lookahead_days)
+
+    asyncio.create_task(_run_effective_alerts_task(lookahead_days, dry_run))
+    return {
+        "status": "started",
+        "message": (
+            f"Effective-date alert check started (lookahead={lookahead_days}d). "
+            "Check /admin/pipeline-status."
+        ),
+    }
+
+
+async def _collect_effective_alert_preview(lookahead_days: int) -> dict:
+    """Synchronous read-only version used by the dry-run / preview button."""
+    now = datetime.utcnow()
+    cutoff = now + timedelta(days=lookahead_days)
+    async with async_session() as session:
+        q = (
+            select(PolicyItem, Jurisdiction)
+            .join(Jurisdiction, PolicyItem.jurisdiction_id == Jurisdiction.id, isouter=True)
+            .where(
+                PolicyItem.effective_date.isnot(None),
+                PolicyItem.effective_date > now,
+                PolicyItem.effective_date <= cutoff,
+            )
+            .order_by(PolicyItem.effective_date.asc())
+        )
+        rows = list((await session.execute(q)).all())
+
+    entries = []
+    for item, jur in rows:
+        days_out = (item.effective_date.replace(tzinfo=None) - now).days
+        entries.append({
+            "id": item.id,
+            "title": item.title,
+            "state": (jur.state_code if jur else None),
+            "jurisdiction": (jur.name if jur else "?"),
+            "effective_date": item.effective_date.date().isoformat(),
+            "days_out": days_out,
+            "impact_score": item.impact_score,
+            "already_alerted": item.effective_alert_sent_at is not None,
+            "source_url": item.source_url,
+        })
+    return {
+        "lookahead_days": lookahead_days,
+        "total": len(entries),
+        "unsent_count": sum(1 for e in entries if not e["already_alerted"]),
+        "items": entries,
+    }
+
+
+async def _run_effective_alerts_task(lookahead_days: int, dry_run: bool):
+    global _pipeline_status
+    _pipeline_status = {
+        "running": True,
+        "last_run": datetime.utcnow().isoformat(),
+        "last_result": None,
+    }
+
+    results = {
+        "lookahead_days": lookahead_days,
+        "dry_run": dry_run,
+        "items_alerted": 0,
+        "slack_sent": False,
+        "items": [],
+        "errors": [],
+    }
+
+    try:
+        now = datetime.utcnow()
+        cutoff = now + timedelta(days=lookahead_days)
+
+        async with async_session() as session:
+            q = (
+                select(PolicyItem, Jurisdiction)
+                .join(Jurisdiction, PolicyItem.jurisdiction_id == Jurisdiction.id, isouter=True)
+                .where(
+                    PolicyItem.effective_date.isnot(None),
+                    PolicyItem.effective_date > now,
+                    PolicyItem.effective_date <= cutoff,
+                )
+            )
+            if not dry_run:
+                q = q.where(PolicyItem.effective_alert_sent_at.is_(None))
+            q = q.order_by(PolicyItem.effective_date.asc())
+            rows = list((await session.execute(q)).all())
+
+            entries = []
+            for item, jur in rows:
+                days_out = (item.effective_date.replace(tzinfo=None) - now).days
+                entries.append({
+                    "id": item.id,
+                    "title": item.title,
+                    "state": (jur.state_code if jur else None),
+                    "jurisdiction": (jur.name if jur else "?"),
+                    "effective_date": item.effective_date.date().isoformat(),
+                    "days_out": days_out,
+                    "impact_score": item.impact_score,
+                    "source_url": item.source_url,
+                })
+            results["items"] = entries
+            results["items_alerted"] = len(entries)
+
+            # Send Slack
+            if entries and settings.slack_webhook_url:
+                try:
+                    from digest.slack import send_to_slack
+
+                    blocks = _build_effective_alert_blocks(entries, lookahead_days)
+                    fallback = (
+                        f"Jeanne: {len(entries)} item"
+                        f"{'s' if len(entries) != 1 else ''} taking effect "
+                        f"in the next {lookahead_days} days"
+                    )
+                    ok = await send_to_slack(settings.slack_webhook_url, blocks, fallback_text=fallback)
+                    results["slack_sent"] = bool(ok)
+                except Exception as e:
+                    results["errors"].append(f"slack: {type(e).__name__}: {str(e)[:200]}")
+                    logger.error(f"Effective-date Slack send failed: {e}")
+
+            # Mark alerted so we don't re-send. Skipped on dry_run.
+            if entries and not dry_run:
+                ids = [item.id for item, _ in rows]
+                stamp = datetime.utcnow()
+                for item, _ in rows:
+                    item.effective_alert_sent_at = stamp
+                await session.commit()
+                logger.info(f"Marked {len(ids)} items as effective-alert-sent.")
+
+    except Exception as e:
+        results["errors"].append(f"task: {type(e).__name__}: {str(e)[:300]}")
+        logger.error(f"Effective-alert task failed: {e}", exc_info=True)
+
+    _pipeline_status = {
+        "running": False,
+        "last_run": datetime.utcnow().isoformat(),
+        "last_result": results,
+    }
+
+
+def _build_effective_alert_blocks(entries: list[dict], lookahead_days: int) -> list[dict]:
+    """Group entries by state and build a Slack block list."""
+    by_state: dict[str, list[dict]] = {}
+    for e in entries:
+        key = e["state"] or e["jurisdiction"] or "—"
+        by_state.setdefault(key, []).append(e)
+
+    blocks: list[dict] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"Heads-up: {len(entries)} item{'s' if len(entries) != 1 else ''} taking effect in the next {lookahead_days} days",
+            },
+        }
+    ]
+    for state in sorted(by_state.keys()):
+        items = by_state[state]
+        lines = []
+        for e in items:
+            link = f"<{e['source_url']}|{e['title']}>" if e.get("source_url") else e["title"]
+            impact = e.get("impact_score") or ""
+            impact_str = f" · *{impact.upper()}*" if impact else ""
+            lines.append(
+                f"• {link}\n  _Effective {e['effective_date']} ({e['days_out']} days out){impact_str}_"
+            )
+        section = {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*{state}*\n" + "\n".join(lines),
+            },
+        }
+        blocks.append(section)
+    return blocks
 
 
 @app.get("/admin/cron-weekly-digest")
