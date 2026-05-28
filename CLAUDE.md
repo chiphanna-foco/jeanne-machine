@@ -41,6 +41,7 @@ The user is busy and shouldn't have to hand-curl admin endpoints in a loop. Buil
 - Per-state visibility: `/admin/stats-by-state`.
 - Per-bill audit: `/admin/audit/trace?bill=WA:HB1217`, `/admin/audit/coverage`.
 - Diagnostics: `/admin/wsl-probe` for WSL API exploration.
+- Effective-date alerts: `/admin/cron-effective-alerts` (run daily) Slacks items taking effect within 90 days and marks `PolicyItem.effective_alert_sent_at` to dedupe. Add a Railway cron for it.
 
 ## Default behaviors to maintain
 
