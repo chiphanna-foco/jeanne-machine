@@ -127,11 +127,17 @@ async def list_items(
     jurisdiction_id: int | None = None,
     state: str | None = None,
     since: str | None = None,
+    action_needed: str | None = None,
     limit: int = Query(default=50, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
 ):
-    """List policy items with optional filters."""
+    """List policy items with optional filters.
+
+    `action_needed` accepts a single value or comma-separated values, e.g.
+    `inform,urgent` to fetch items the classifier flagged as passed laws
+    or as needing action now.
+    """
     query = select(PolicyItem).order_by(PolicyItem.discovered_at.desc())
 
     if topic:
@@ -148,6 +154,12 @@ async def list_items(
             query = query.where(PolicyItem.discovered_at >= since_dt)
         except ValueError:
             pass
+    if action_needed:
+        needed_list = [s.strip() for s in action_needed.split(",") if s.strip()]
+        if len(needed_list) == 1:
+            query = query.where(PolicyItem.action_needed == needed_list[0])
+        elif needed_list:
+            query = query.where(PolicyItem.action_needed.in_(needed_list))
 
     total_q = select(func.count()).select_from(query.subquery())
     total = (await session.execute(total_q)).scalar() or 0

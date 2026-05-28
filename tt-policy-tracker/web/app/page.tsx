@@ -30,11 +30,32 @@ interface ApiResponse {
   items: PolicyItem[];
 }
 
+type TabKey = "all" | "laws" | "monitor";
+
+const TABS: { key: TabKey; label: string; emoji: string; action_needed?: string; description: string }[] = [
+  { key: "all", label: "Everything", emoji: "📋", description: "All tracked items, regardless of status." },
+  {
+    key: "laws",
+    label: "New Laws",
+    emoji: "🆕",
+    action_needed: "inform,urgent",
+    description: "Items the classifier marked as passed law or needing action now.",
+  },
+  {
+    key: "monitor",
+    label: "To Monitor",
+    emoji: "👀",
+    action_needed: "monitor",
+    description: "In progress — watch these as they move.",
+  },
+];
+
 export default function Dashboard() {
   const [items, setItems] = useState<PolicyItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<TabKey>("all");
   const [filters, setFilters] = useState<{
     topic?: string;
     impact?: string;
@@ -46,6 +67,8 @@ export default function Dashboard() {
     if (filters.topic) params.set("topic", filters.topic);
     if (filters.impact) params.set("impact", filters.impact);
     if (filters.state) params.set("state", filters.state);
+    const activeTab = TABS.find((t) => t.key === tab);
+    if (activeTab?.action_needed) params.set("action_needed", activeTab.action_needed);
     params.set("limit", "50");
 
     setLoading(true);
@@ -66,7 +89,9 @@ export default function Dashboard() {
         setTotal(0);
       })
       .finally(() => setLoading(false));
-  }, [filters]);
+  }, [filters, tab]);
+
+  const activeTab = TABS.find((t) => t.key === tab) || TABS[0];
 
   return (
     <div>
@@ -92,10 +117,60 @@ export default function Dashboard() {
         >
           <Nav />
           <StatsBar />
+
+          {/* Status tabs: New Laws vs To Monitor vs Everything */}
+          <div
+            role="tablist"
+            style={{
+              display: "flex",
+              gap: 4,
+              background: "#f1f5f9",
+              borderRadius: 12,
+              padding: 4,
+              width: "fit-content",
+              marginBottom: 12,
+            }}
+          >
+            {TABS.map((t) => {
+              const active = t.key === tab;
+              return (
+                <button
+                  key={t.key}
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setTab(t.key)}
+                  style={{
+                    padding: "7px 14px",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    color: active ? "#fff" : "var(--color-text-muted)",
+                    background: active
+                      ? "linear-gradient(135deg, #7c3aed 0%, #ec4899 100%)"
+                      : "transparent",
+                    border: "none",
+                    borderRadius: 8,
+                    cursor: "pointer",
+                    transition: "all 160ms ease",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    whiteSpace: "nowrap",
+                    boxShadow: active ? "0 3px 12px rgba(124, 58, 237, 0.3)" : "none",
+                  }}
+                >
+                  <span style={{ fontSize: 13 }}>{t.emoji}</span>
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
+
           <Filters filters={filters} onChange={setFilters} />
 
           <div style={{ fontSize: 12, color: "var(--color-text-subtle)", fontWeight: 600 }}>
-            {loading ? "Loading..." : `${total} item${total !== 1 ? "s" : ""}`}
+            {loading
+              ? "Loading..."
+              : `${total} ${activeTab.label.toLowerCase()} item${total !== 1 ? "s" : ""} · ${activeTab.description}`}
           </div>
         </div>
 
