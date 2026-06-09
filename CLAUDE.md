@@ -62,6 +62,10 @@ gh run view <run-id> --log | sed -n '/response body/,/----/p'  # read the respon
 
 ## Default behaviors to maintain
 
-- OpenStates is rate-limited to ≤9 req/min globally (`OS_MIN_REQUEST_INTERVAL = 8.0` in `adapters/openstates.py`). Don't lower this.
+- OpenStates has TWO limits: ~10 req/min AND **250 requests/DAY** (free tier). The per-minute one is handled by `OS_MIN_REQUEST_INTERVAL = 8.0`; the per-day one is the binding constraint — a naive 50-state daily sweep blows it and every state after the cap silently 429-fails. Don't lower the 8s interval, and don't remove the per-day guards:
+  - `openstates_daily_request_budget` (default 220) — class-level counter aborts before the cap.
+  - Daily/weekly sweeps use `OpenStatesAdapter(rotate=True)` → only today's bucket of ~10 states is fetched (5-day cycle, 14-day overlap window), keeping each run far under 250/day. Targeted backfills (`run-pipeline?state=xx`) use `rotate=False` and fetch fully.
+  - A per-day-quota 429 (body says "exceeded limit") raises `OpenStatesQuotaError` and ABORTS the sweep — never retried, because retries also count against the daily quota. Don't "fix" this by adding retries.
+  - Diagnose with `/admin/os-probe?state=co&identifier=...` (shows live quota 429s + which sessions OpenStates actually has).
 - `wa_leg` uses bulk-fetch + classifier filtering (WSL doesn't expose topical index). Don't try to add topic-based pre-filtering — the API doesn't support it.
 - Daily cron drains 300 docs; weekly-full drains 500. If the backlog grows again, raise those, not by ingesting less.

@@ -410,7 +410,10 @@ async def _run_pipeline_task(
         else:
             os_states = ALL_STATES if settings.openstates_scope == "all" else None
             adapters = [
-                OpenStatesAdapter(states=os_states),
+                # rotate=True: each daily sweep fetches only today's bucket of
+                # states (with a wider window) so we stay under OpenStates'
+                # 250-requests/day cap instead of 429-failing most states.
+                OpenStatesAdapter(states=os_states, rotate=True),
                 WaLegAdapter(),
                 BlsCpiAdapter(),
                 CongressAdapter(),
@@ -2200,7 +2203,9 @@ async def _run_weekly_full_task():
         since = datetime.utcnow() - timedelta(days=7)
         os_states = ALL_STATES if settings.openstates_scope == "all" else None
         adapters = [
-            OpenStatesAdapter(states=os_states),
+            # rotate=True so this stays under the OpenStates 250/day cap; the
+            # daily cron already cycles all states over its 5-day rotation.
+            OpenStatesAdapter(states=os_states, rotate=True),
             CongressAdapter(),
             FederalRegisterAdapter(),
             LegistarAdapter(),
