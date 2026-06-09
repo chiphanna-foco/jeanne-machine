@@ -1,0 +1,79 @@
+name: verify-co-ingest
+
+# One-shot (date-pinned) automatic verification of the OpenStates 250/day
+# quota fix (PR #37). On 2026-06-10, after the daily quota resets and the
+# 10:00 UTC daily cron runs, this force-fetches Colorado, enriches it, and
+# checks whether HB26-1196 finally lands — so nobody has to babysit it.
+#
+# Reporting: run-pipeline Slacks if it finds new CO items, and drain-enrich
+# Slacks unconditionally, so the user gets pinged. The detailed PASS/FAIL
+# verdict (incl. the OpenStates probe) is written to this run's log, and the
+# job exits non-zero on FAIL so a failed run is visible at a glance.
+#
+# The cron is pinned to June 10; after it has run and been reviewed this file
+# can be deleted (or kept — it re-verifies harmlessly each June 10). It can
+# also be run on demand via "Run workflow" (workflow_dispatch).
+
+on:
+  schedule:
+    - cron: "23 16 10 6 *" # 2026-06-10 16:23 UTC
+  workflow_dispatch: {}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Force CO ingest + enrich, then verify HB26-1196
+        env:
+          BASE: ${{ secrets.API_BASE_URL }}
+          TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -uo pipefail
+          base="${BASE%/}"
+
+          call () { # $1 = path+query (no token); echoes response body
+            local p="$1" sep
+            case "$p" in *\?*) sep="&";; *) sep="?";; esac
+            curl -sS --max-time 290 "$base/${p}${sep}token=${TOKEN}"
+          }
+
+          wait_idle () { # poll pipeline-status until running=false (or timeout)
+            for _ in $(seq 1 40); do
+              local r; r="$(call "admin/pipeline-status")"
+              echo "  status: $(echo "$r" | jq -c '{running,last_result}' 2>/dev/null || echo "$r")"
+              if echo "$r" | jq -e '.running == false' >/dev/null 2>&1; then return 0; fi
+              sleep 30
+            done
+            echo "  (timed out waiting for idle)"
+          }
+
+          echo "== 1. Force CO fetch + enrich (rotate=False, 180-day window) =="
+          call "admin/run-pipeline?state=co&days_back=180&batch_size=200"; echo
+          sleep 20; wait_idle
+
+          echo "== 2. Drain any remaining CO queue (Slacks when done) =="
+          call "admin/drain-enrich?state=CO"; echo
+          sleep 20; wait_idle
+
+          echo "== 3. Check live CO items =="
+          items="$(call "api/items?state=co&limit=200")"
+          total="$(echo "$items" | jq -r '.total // 0' 2>/dev/null || echo 0)"
+          has1196="$(echo "$items" | grep -ciE '1196|HB26-1196' || true)"
+          echo "  CO items total=$total ; 1196 mentions=$has1196"
+
+          echo "== 4. Probe OpenStates for the bill =="
+          probe="$(call "admin/os-probe?state=co&identifier=HB26-1196")"
+          echo "$probe" | jq '{q_search_match, recent_status, sessions_seen, recent_total_items}' 2>/dev/null || echo "$probe"
+
+          echo "============================================================"
+          if [ "${total:-0}" -gt 0 ] && [ "${has1196:-0}" -gt 0 ]; then
+            echo "VERDICT: ✅ PASS — Colorado ingested and HB26-1196 is present."
+          elif [ "${total:-0}" -gt 0 ]; then
+            echo "VERDICT: ⚠️ PARTIAL — CO now has $total items, but HB26-1196 not among them."
+            echo "Check the probe's sessions_seen above: if 2026A is missing, it's an OpenStates source gap."
+            exit 1
+          else
+            echo "VERDICT: ❌ FAIL — CO still has 0 items after a clean fetch."
+            echo "Most likely an OpenStates source-coverage gap for the 2026 session (see probe above)."
+            exit 1
+          fi
