@@ -37,7 +37,7 @@ gh run view <run-id> --log | sed -n '/response body/,/----/p'  # read the respon
 ```
 `gh run watch <run-id> --exit-status` blocks until the run finishes. The token is injected from the `ADMIN_TOKEN` repo secret — never pass it in `query`, and never print it.
 
-**One-time setup (human, from any browser — no terminal):** add repo secret `ADMIN_TOKEN` (= the value of `$ADMIN_TOKEN`) at `github.com/chiphanna-foco/jeanne-machine/settings/secrets/actions`. Optional `RAILWAY_BASE_URL` secret overrides the default base URL.
+**Setup:** none needed — reuses the existing `ADMIN_TOKEN` and `API_BASE_URL` repo secrets that already power the cron workflows.
 
 **Caveats:** ~30s round-trip per call (runner spin-up) — fine for one-shot admin actions, not for tight polling. Background-task endpoints (`drain-enrich`, `run-pipeline`) return "started" immediately and still Slack their result when done, so dispatch-and-forget works exactly as before. The workflow fails the run on any HTTP ≥ 400 so errors are obvious in `gh run view`.
 

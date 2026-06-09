@@ -7,10 +7,9 @@ name: admin
 # Railway. Claude dispatches this workflow with `gh workflow run`, the runner
 # makes the real call, and Claude reads the JSON back from the run logs.
 #
-# Required repo secret:
-#   ADMIN_TOKEN       - the value of $ADMIN_TOKEN that gates /admin/* endpoints
-# Optional repo secret:
-#   RAILWAY_BASE_URL  - override the base URL (defaults to the known Railway URL)
+# Required repo secrets (already configured, shared with the cron workflows):
+#   ADMIN_TOKEN   - the value of $ADMIN_TOKEN that gates /admin/* endpoints
+#   API_BASE_URL  - base URL of the deployed API (e.g. https://...railway.app)
 
 on:
   workflow_dispatch:
@@ -33,7 +32,7 @@ jobs:
         env:
           # Passed through env (not string-interpolated into the script) to
           # avoid shell-injection and quoting issues with & and = in queries.
-          BASE: ${{ secrets.RAILWAY_BASE_URL }}
+          BASE: ${{ secrets.API_BASE_URL }}
           TOKEN: ${{ secrets.ADMIN_TOKEN }}
           ADMIN_PATH: ${{ inputs.path }}
           ADMIN_QUERY: ${{ inputs.query }}
