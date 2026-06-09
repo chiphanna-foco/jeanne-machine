@@ -127,6 +127,14 @@ const ACTIONS: Action[] = [
     view: true,
   },
   {
+    key: "probe-co-bill",
+    label: "Probe OpenStates (CO HB26-1196)",
+    description: "Ask OpenStates directly what it has for a state/bill — distinguishes a source-coverage gap from an ingestion miss.",
+    path: "/admin/os-probe?state=co&identifier=HB26-1196",
+    icon: "🛰️",
+    view: true,
+  },
+  {
     key: "inspect-ca-cpi",
     label: "Inspect CA CPI Source",
     description: "Show the raw text of the CA DIR CCPI PDF (for building the parser).",

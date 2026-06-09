@@ -1354,6 +1354,84 @@ async def admin_audit_trace(
     return await trace(bill, rerun_classifier)
 
 
+@app.get("/admin/os-probe")
+async def admin_os_probe(
+    state: str = Query(default="co"),
+    identifier: str = Query(default="HB26-1196"),
+    token: str | None = Query(default=None),
+):
+    """Probe OpenStates directly: what does it actually have for this state/bill?
+
+    Distinguishes a *source-coverage gap* (OpenStates doesn't have the bill /
+    the current session) from an *ingestion-window miss* (we just never fetched
+    it). Returns:
+      - whether a q-search finds the specific bill,
+      - the 20 most-recently-updated bills for the state (identifier + session
+        + updated_at), so you can see if the current session is present at all.
+
+    Usage: /admin/os-probe?state=co&identifier=HB26-1196&token=YOUR_TOKEN
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    import httpx
+
+    from adapters.openstates import BASE_URL, STATE_TO_JURISDICTION
+
+    jid = STATE_TO_JURISDICTION.get(state.lower())
+    if not jid:
+        return {"error": f"no OCD jurisdiction for state '{state}'"}
+    headers = {"X-API-KEY": settings.openstates_api_key, "Accept": "application/json"}
+    norm = identifier.replace(" ", "").replace("-", "").lower()
+
+    def slim(b: dict) -> dict:
+        return {
+            "identifier": b.get("identifier"),
+            "session": b.get("session"),
+            "updated_at": b.get("updated_at"),
+            "latest_action": b.get("latest_action_date"),
+            "title": (b.get("title") or "")[:80],
+        }
+
+    out: dict = {"state": state.upper(), "identifier": identifier}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # 1) Targeted q-search for the specific bill.
+        r1 = await client.get(
+            f"{BASE_URL}/bills",
+            params={"jurisdiction": jid, "q": identifier, "per_page": 20},
+            headers=headers,
+        )
+        out["q_search_status"] = r1.status_code
+        hits = r1.json().get("results", []) if r1.status_code == 200 else []
+        out["q_search_identifiers"] = [b.get("identifier") for b in hits]
+        out["q_search_match"] = any(
+            (b.get("identifier") or "").replace(" ", "").replace("-", "").lower() == norm
+            for b in hits
+        )
+        if not (200 <= r1.status_code < 300):
+            out["q_search_error"] = r1.text[:300]
+
+        # 2) Most-recently-updated bills for the state (is the current session here?).
+        r2 = await client.get(
+            f"{BASE_URL}/bills",
+            params={"jurisdiction": jid, "sort": "updated_desc", "per_page": 20},
+            headers=headers,
+        )
+        out["recent_status"] = r2.status_code
+        if 200 <= r2.status_code < 300:
+            data = r2.json()
+            out["recent_total_items"] = data.get("pagination", {}).get("total_items")
+            results = data.get("results", [])
+            out["recent_bills"] = [slim(b) for b in results]
+            out["sessions_seen"] = sorted(
+                {b.get("session") for b in results if b.get("session")}
+            )
+        else:
+            out["recent_error"] = r2.text[:300]
+
+    return out
+
+
 @app.get("/admin/reset-raw")
 async def reset_raw_documents(
     token: str | None = Query(default=None),
