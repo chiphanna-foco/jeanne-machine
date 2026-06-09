@@ -7,7 +7,7 @@ API docs: https://docs.openstates.org/api-v3/
 import asyncio
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 
@@ -17,6 +17,13 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://v3.openstates.org"
+
+
+class OpenStatesQuotaError(Exception):
+    """Raised when the OpenStates per-DAY request quota (or our own budget) is
+    reached. Unlike a per-minute 429, retrying cannot help until the quota
+    resets at midnight — and each retry still counts against it — so this
+    aborts the run instead of backing off."""
 
 # Free-tier Open States caps at 10 req/min. We pace at ~7.5/min (8s min
 # interval) and share that rate state across every OpenStatesAdapter
@@ -108,16 +115,30 @@ class OpenStatesAdapter(BaseAdapter):
     # Class-level rate state so concurrent adapter instances share the budget.
     _last_request_at: float = 0.0
     _rate_lock: asyncio.Lock | None = None
+    # Class-level per-DAY request counter, shared across instances. Resets when
+    # the UTC date rolls over. In-memory only (a process restart resets it), so
+    # the real backstop is the per-day-quota 429 abort below.
+    _day_stamp: str = ""
+    _day_count: int = 0
 
     @property
     def source_name(self) -> str:
         return "openstates"
 
-    def __init__(self, client: httpx.AsyncClient | None = None, states: list[str] | None = None):
+    def __init__(
+        self,
+        client: httpx.AsyncClient | None = None,
+        states: list[str] | None = None,
+        rotate: bool = False,
+    ):
         super().__init__(client or httpx.AsyncClient(timeout=120.0))
         if states is None:
             states = ALL_STATES if settings.openstates_scope == "all" else PHASE0_STATES
         self.states = states
+        # When True, only today's rotation bucket of states is fetched (and with
+        # a wider window) so a full sweep stays under the daily request budget.
+        # Targeted runs (explicit states_filter) leave this off and fetch fully.
+        self.rotate = rotate
         self.api_key = settings.openstates_api_key
         # Lazy-init the class-level lock on first instance so we don't need a
         # running event loop at module import time.
@@ -144,10 +165,22 @@ class OpenStatesAdapter(BaseAdapter):
         for attempt in range(max_retries):
             assert OpenStatesAdapter._rate_lock is not None
             async with OpenStatesAdapter._rate_lock:
+                # Per-day budget: reset the counter on a UTC date rollover, then
+                # refuse to spend past the budget (leaves headroom under 250/day).
+                today = datetime.utcnow().strftime("%Y-%m-%d")
+                if OpenStatesAdapter._day_stamp != today:
+                    OpenStatesAdapter._day_stamp = today
+                    OpenStatesAdapter._day_count = 0
+                budget = settings.openstates_daily_request_budget
+                if OpenStatesAdapter._day_count >= budget:
+                    raise OpenStatesQuotaError(
+                        f"daily request budget reached ({OpenStatesAdapter._day_count}/{budget})"
+                    )
                 elapsed = time.monotonic() - OpenStatesAdapter._last_request_at
                 if elapsed < OS_MIN_REQUEST_INTERVAL:
                     await asyncio.sleep(OS_MIN_REQUEST_INTERVAL - elapsed)
                 OpenStatesAdapter._last_request_at = time.monotonic()
+                OpenStatesAdapter._day_count += 1
 
             try:
                 resp = await self.client.get(
@@ -164,6 +197,15 @@ class OpenStatesAdapter(BaseAdapter):
                 continue
 
             if resp.status_code == 429:
+                # A per-DAY quota 429 ("exceeded limit of 250/day") can't be
+                # waited out before midnight, and every retry burns more quota —
+                # so abort the whole run immediately instead of backing off.
+                body = (resp.text or "").lower()
+                if "exceeded limit" in body or "/day" in body or "per day" in body:
+                    logger.error(
+                        f"OpenStates {path} hit the daily quota: {resp.text[:200]}"
+                    )
+                    raise OpenStatesQuotaError(f"daily quota exhausted: {resp.text[:200]}")
                 # Exponential floor: 60, 120, 240, 480, capped at 600s
                 exp_floor = min(60 * (2 ** attempt), 600)
                 retry_after = exp_floor
@@ -210,14 +252,43 @@ class OpenStatesAdapter(BaseAdapter):
             break  # Jurisdictions endpoint returns all states at once
         return jurisdictions
 
+    def _states_for_run(self, since: datetime) -> tuple[list[str], str]:
+        """Pick which states to fetch this run and the effective `since`.
+
+        In rotate mode the configured states are split into
+        `openstates_rotation_buckets` buckets keyed by UTC day-of-year, so only
+        ~1/N of them are fetched per run — keeping a full sweep under the daily
+        request budget. Those rotated states use a wider window
+        (`openstates_rotation_window_days`) so the N-day cycle overlaps and a
+        state skipped for a few days still catches up. Non-rotate (targeted)
+        runs fetch every configured state with the caller's `since`.
+        """
+        if not self.rotate:
+            return list(self.states), since.strftime("%Y-%m-%d")
+
+        buckets = max(1, settings.openstates_rotation_buckets)
+        ordered = sorted(self.states)
+        today_bucket = datetime.utcnow().timetuple().tm_yday % buckets
+        chosen = [s for i, s in enumerate(ordered) if i % buckets == today_bucket]
+        window = timedelta(days=settings.openstates_rotation_window_days)
+        rot_since = min(since, datetime.utcnow() - window)
+        return chosen, rot_since.strftime("%Y-%m-%d")
+
     async def fetch_new_items(self, since: datetime) -> list[RawDoc]:
         """Fetch bills updated since `since` for the configured states."""
         docs = []
-        since_str = since.strftime("%Y-%m-%d")
+        states_today, since_str = self._states_for_run(since)
         # Per-state results recorded on the instance so the pipeline can surface them.
         self.last_run_stats: dict[str, dict] = {}
+        if self.rotate:
+            skipped = [s for s in self.states if s not in states_today]
+            self.last_run_stats["_rotation"] = {
+                "bucket_states": [s.upper() for s in states_today],
+                "deferred_to_other_days": len(skipped),
+                "window_days": settings.openstates_rotation_window_days,
+            }
 
-        for state in self.states:
+        for state in states_today:
             jurisdiction_id = STATE_TO_JURISDICTION.get(state.lower())
             if not jurisdiction_id:
                 logger.warning(f"No OCD jurisdiction ID for state: {state}")
@@ -229,6 +300,13 @@ class OpenStatesAdapter(BaseAdapter):
                 docs.extend(state_docs)
                 self.last_run_stats[state.upper()] = {"fetched": len(state_docs), "error": None}
                 logger.info(f"OpenStates: fetched {len(state_docs)} bills from {state.upper()} since {since_str}")
+            except OpenStatesQuotaError as e:
+                # Day quota / budget gone — every remaining request would also
+                # fail and burn quota. Stop the sweep; the rest catch up next run.
+                logger.error(f"OpenStates: aborting sweep at {state.upper()}: {e}")
+                self.last_run_stats[state.upper()] = {"fetched": 0, "error": f"quota: {e}"}
+                self.last_run_stats["_aborted"] = {"reason": str(e), "at_state": state.upper()}
+                break
             except Exception as e:
                 msg = f"{type(e).__name__}: {str(e)[:200]}"
                 logger.error(f"OpenStates: failed for {state.upper()}: {msg}")

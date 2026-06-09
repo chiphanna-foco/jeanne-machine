@@ -38,6 +38,18 @@ class Settings(BaseSettings):
     # Open States scope — "phase0" (OH + CO only) or "all" (all 50 states)
     openstates_scope: str = "all"
 
+    # Open States free tier caps at 250 requests/DAY (separate from the ~10/min
+    # limit). The daily 50-state sweep would blow that, so we (a) stop before a
+    # budget and (b) rotate states across days. Leave headroom below 250 for
+    # manual backfills / probes.
+    openstates_daily_request_budget: int = 220
+    # Daily sweep rotates ALL_STATES across this many buckets — ~10 states/day
+    # on a 5-day cycle keeps each run well under the daily budget.
+    openstates_rotation_buckets: int = 5
+    # Each rotated state is fetched with this lookback so the 5-day cycle has
+    # generous overlap and a state down for a few days still catches up.
+    openstates_rotation_window_days: int = 14
+
     # Database — Railway sets DATABASE_URL; we normalize it for asyncpg
     database_url: str = "postgresql+asyncpg://tracker:tracker@localhost:5432/policy_tracker"
 
