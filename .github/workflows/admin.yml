@@ -1,0 +1,81 @@
+name: admin
+
+# Claude's "remote hands" for the policy-tracker admin API.
+#
+# The Claude Code sandbox cannot make outbound HTTP to Railway, so Claude
+# cannot curl the /admin/* endpoints itself. GitHub Actions runners CAN reach
+# Railway. Claude dispatches this workflow with `gh workflow run`, the runner
+# makes the real call, and Claude reads the JSON back from the run logs.
+#
+# Required repo secret:
+#   ADMIN_TOKEN       - the value of $ADMIN_TOKEN that gates /admin/* endpoints
+# Optional repo secret:
+#   RAILWAY_BASE_URL  - override the base URL (defaults to the known Railway URL)
+
+on:
+  workflow_dispatch:
+    inputs:
+      path:
+        description: 'Admin path without leading slash, e.g. admin/backfill-bill'
+        required: true
+        type: string
+      query:
+        description: 'Query string WITHOUT the token, e.g. state=co&identifier=HB26-1196'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  call:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call admin endpoint
+        env:
+          # Passed through env (not string-interpolated into the script) to
+          # avoid shell-injection and quoting issues with & and = in queries.
+          BASE: ${{ secrets.RAILWAY_BASE_URL }}
+          TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          ADMIN_PATH: ${{ inputs.path }}
+          ADMIN_QUERY: ${{ inputs.query }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::ADMIN_TOKEN secret is not set. Add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          base="${BASE:-https://jeanne-machine.up.railway.app}"
+          path="${ADMIN_PATH#/}"   # strip any leading slash
+
+          if [ -n "${ADMIN_QUERY:-}" ]; then
+            url="${base}/${path}?${ADMIN_QUERY}&token=${TOKEN}"
+          else
+            url="${base}/${path}?token=${TOKEN}"
+          fi
+
+          # Log a token-free version of the request. (GitHub also auto-masks the
+          # secret value in logs, but we avoid printing it at all.)
+          echo "GET ${base}/${path}?${ADMIN_QUERY:-}"
+          echo "--------------------------------------------------------"
+
+          code=$(curl -sS --max-time 280 -w '%{http_code}' -o resp.body "$url" || echo "000")
+          echo "HTTP_STATUS=${code}"
+          echo "--------------------- response body --------------------"
+          if command -v jq >/dev/null 2>&1; then
+            jq . resp.body 2>/dev/null || cat resp.body
+          else
+            cat resp.body
+          fi
+          echo ""
+          echo "--------------------------------------------------------"
+
+          # Surface HTTP errors as a failed job so it's obvious in `gh run view`.
+          if [ "${code}" = "000" ]; then
+            echo "::error::Request failed to complete (timeout or connection error)."
+            exit 1
+          fi
+          if [ "${code}" -ge 400 ]; then
+            echo "::error::Admin endpoint returned HTTP ${code}."
+            exit 1
+          fi

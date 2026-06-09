@@ -20,9 +20,26 @@ The user is busy and shouldn't have to hand-curl admin endpoints in a loop. Buil
 
 ## Sandbox limits Claude has to work around
 
-- **No outbound HTTP to Railway.** `jeanne-machine.up.railway.app` is not in the curl allowlist for the Claude sandbox. Claude **cannot** invoke admin endpoints itself — only the user can. Build endpoints that need zero follow-up, not endpoints that need Claude to babysit them.
+- **No *direct* outbound HTTP to Railway.** `jeanne-machine.up.railway.app` is not in the curl allowlist for the Claude sandbox, so Claude cannot `curl` admin endpoints directly. **But Claude CAN now invoke them indirectly via GitHub Actions** — see "Claude runs admin endpoints itself" below. Still prefer endpoints that need zero babysitting (loop-inside-the-endpoint, Slack-on-done), because the Actions round-trip is ~30s per call and not meant for tight polling loops.
 - **No Docker daemon, no local DB, no real API keys.** Everything is verified by the user against prod via the admin endpoints. Plan accordingly — instrument endpoints so they return enough JSON for diagnosis in one call.
 - **WebFetch 403s most external sites.** When third-party APIs need probing, build an admin endpoint that probes them from Railway (which IS allowed outbound). Don't ask the user to relay browser requests.
+
+## Claude runs admin endpoints itself (GitHub Actions "remote hands")
+
+The sandbox can't reach Railway, but GitHub Actions runners can. `.github/workflows/admin.yml` is a `workflow_dispatch` job that curls any `/admin/*` endpoint and prints the JSON response to the run log. Claude dispatches it and reads the result back — no human terminal needed.
+
+**To call any admin endpoint:**
+```bash
+gh workflow run admin.yml -f path="admin/<endpoint>" -f query="<key=val&key=val WITHOUT token>"
+# then find the run and read the JSON it returned:
+gh run list --workflow=admin.yml -L 1                      # get the run id / status
+gh run view <run-id> --log | sed -n '/response body/,/----/p'  # read the response
+```
+`gh run watch <run-id> --exit-status` blocks until the run finishes. The token is injected from the `ADMIN_TOKEN` repo secret — never pass it in `query`, and never print it.
+
+**One-time setup (human, from any browser — no terminal):** add repo secret `ADMIN_TOKEN` (= the value of `$ADMIN_TOKEN`) at `github.com/chiphanna-foco/jeanne-machine/settings/secrets/actions`. Optional `RAILWAY_BASE_URL` secret overrides the default base URL.
+
+**Caveats:** ~30s round-trip per call (runner spin-up) — fine for one-shot admin actions, not for tight polling. Background-task endpoints (`drain-enrich`, `run-pipeline`) return "started" immediately and still Slack their result when done, so dispatch-and-forget works exactly as before. The workflow fails the run on any HTTP ≥ 400 so errors are obvious in `gh run view`.
 
 ## Git flow
 
