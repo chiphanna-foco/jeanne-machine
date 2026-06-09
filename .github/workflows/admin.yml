@@ -45,6 +45,7 @@ jobs:
           fi
 
           base="${BASE:-https://jeanne-machine.up.railway.app}"
+          base="${base%/}"         # strip trailing slash (a double slash makes Starlette 404)
           path="${ADMIN_PATH#/}"   # strip any leading slash
 
           if [ -n "${ADMIN_QUERY:-}" ]; then
