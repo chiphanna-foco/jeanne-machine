@@ -1758,13 +1758,17 @@ async def hub_alerts(
 
     Returns a slack_alerts.json-shaped document: one aggregated policy-radar
     digest alert covering med/high-impact items discovered in the lookback
-    window, plus a standalone alert per action_needed=='urgent' item. The hub
-    dedupes on alert_id, so calling this repeatedly is safe.
+    window, a standalone alert per action_needed=='urgent' item, and a
+    product-change flag per high-impact item whose topics map to a product
+    surface (enrichment/product_areas.py) and whose effective date is near.
+    The hub dedupes on alert_id, so calling this repeatedly is safe.
 
     Usage: /admin/hub-alerts?days_back=1&token=YOUR_TOKEN
     """
     if not _check_admin_token(token):
         return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    from enrichment.product_areas import FLAG_EFFECTIVE_WINDOW_DAYS, product_impact
 
     impacts = ["high"] if min_impact == "high" else ["med", "high"]
     since = datetime.utcnow() - timedelta(days=days_back)
@@ -1837,6 +1841,42 @@ async def hub_alerts(
                         "body": urgent_body,
                     }
                 )
+
+        # Product-change flags: high impact + mapped product surface + near
+        # effective date (or explicitly urgent). These are the "this law
+        # means the product has to change" alerts, addressed to a DRI.
+        flag_horizon = datetime.utcnow() + timedelta(days=FLAG_EFFECTIVE_WINDOW_DAYS)
+        for item in items:
+            if item.impact_score != "high":
+                continue
+            impact = product_impact(item.topic_tags)
+            if not impact:
+                continue
+            effective_soon = (
+                item.effective_date is not None
+                and item.effective_date.replace(tzinfo=None) <= flag_horizon
+            )
+            if not effective_soon and item.action_needed != "urgent":
+                continue
+            flag_body = _line(item)
+            flag_body += (
+                f"\n\n*Product surfaces:* {', '.join(impact['surfaces'])}"
+                f"\n*DRI:* {', '.join(impact['dris'])}"
+            )
+            if item.impact_reasoning:
+                flag_body += f"\n*Why:* {item.impact_reasoning}"
+            alerts.append(
+                {
+                    "alert_id": hashlib.sha1(f"product-flag:{item.id}".encode()).hexdigest()[:12],
+                    "brand": "policy",
+                    "kind": "product_flag",
+                    "mode": "draft",
+                    "slack_target": None,
+                    "severity": "act_now",
+                    "subject": f"Product change flag: {item.title[:70]}",
+                    "body": flag_body,
+                }
+            )
 
     return {
         "generated_at": datetime.utcnow().isoformat(),
