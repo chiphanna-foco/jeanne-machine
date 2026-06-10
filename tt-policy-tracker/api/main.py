@@ -1,6 +1,7 @@
 """FastAPI internal API for the TT Policy Tracker."""
 
 import asyncio
+import hashlib
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -1745,6 +1746,104 @@ async def cron_daily_slack(token: str | None = Query(default=None)):
         return JSONResponse(status_code=400, content={"error": "SLACK_WEBHOOK_URL not configured"})
     asyncio.create_task(_run_slack_digest_task("daily", 0))
     return {"status": "started", "message": "Daily Slack digest task started."}
+
+
+@app.get("/admin/hub-alerts")
+async def hub_alerts(
+    days_back: int = Query(default=1, ge=1, le=90),
+    min_impact: str = Query(default="med"),
+    token: str | None = Query(default=None),
+):
+    """Producer payload for The Plunger's hub delivery (POST /api/cron/deliver).
+
+    Returns a slack_alerts.json-shaped document: one aggregated policy-radar
+    digest alert covering med/high-impact items discovered in the lookback
+    window, plus a standalone alert per action_needed=='urgent' item. The hub
+    dedupes on alert_id, so calling this repeatedly is safe.
+
+    Usage: /admin/hub-alerts?days_back=1&token=YOUR_TOKEN
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    impacts = ["high"] if min_impact == "high" else ["med", "high"]
+    since = datetime.utcnow() - timedelta(days=days_back)
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(PolicyItem)
+            .where(PolicyItem.discovered_at >= since)
+            .where(PolicyItem.impact_score.in_(impacts))
+            .order_by(PolicyItem.impact_score.desc(), PolicyItem.discovered_at.desc())
+            .limit(50)
+        )
+        items = list(result.scalars().all())
+
+        jur_ids = {i.jurisdiction_id for i in items if i.jurisdiction_id}
+        jur_names: dict[int, str] = {}
+        if jur_ids:
+            jres = await session.execute(
+                select(Jurisdiction).where(Jurisdiction.id.in_(jur_ids))
+            )
+            jur_names = {j.id: (j.state_code or j.name) for j in jres.scalars().all()}
+
+    def _line(item: PolicyItem) -> str:
+        emoji = {"high": "\U0001f534", "med": "\U0001f7e1"}.get(item.impact_score, "\U0001f7e2")
+        jur = jur_names.get(item.jurisdiction_id, "")
+        link = f"<{item.source_url}|{item.title}>" if item.source_url else item.title
+        eff = (
+            f" · effective {item.effective_date.date().isoformat()}"
+            if item.effective_date
+            else ""
+        )
+        summary = (item.summary or "")[:300]
+        return f"{emoji} *{jur}* {link}{eff}\n_{summary}_"
+
+    today = datetime.utcnow().date().isoformat()
+    alerts = []
+    if items:
+        ids = ",".join(str(i.id) for i in items)
+        digest_id = hashlib.sha1(f"policy-digest:{today}:{ids}".encode()).hexdigest()[:12]
+        shown = items[:15]
+        body = "\n\n".join(_line(i) for i in shown)
+        if len(items) > len(shown):
+            body += f"\n\n…and {len(items) - len(shown)} more"
+        alerts.append(
+            {
+                "alert_id": digest_id,
+                "brand": "policy",
+                "kind": "policy_digest",
+                "mode": "draft",
+                "slack_target": None,
+                "severity": "high" if any(i.impact_score == "high" for i in items) else "elevated",
+                "subject": f"Policy radar — {len(items)} item{'s' if len(items) != 1 else ''} (last {days_back}d)",
+                "body": body,
+            }
+        )
+        for item in items:
+            if item.action_needed == "urgent":
+                urgent_body = _line(item)
+                if item.impact_reasoning:
+                    urgent_body += f"\n\n*Why it matters:* {item.impact_reasoning}"
+                alerts.append(
+                    {
+                        "alert_id": hashlib.sha1(f"policy-urgent:{item.id}".encode()).hexdigest()[:12],
+                        "brand": "policy",
+                        "kind": "policy_urgent",
+                        "mode": "draft",
+                        "slack_target": None,
+                        "severity": "act_now",
+                        "subject": f"Urgent policy item: {item.title[:80]}",
+                        "body": urgent_body,
+                    }
+                )
+
+    return {
+        "generated_at": datetime.utcnow().isoformat(),
+        "as_of_date": today,
+        "alert_count": len(alerts),
+        "alerts": alerts,
+    }
 
 
 async def _run_slack_digest_task(frequency: str, days_back: int):
