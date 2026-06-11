@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 interface PolicyItem {
   id: number;
   title: string;
@@ -12,7 +14,14 @@ interface PolicyItem {
   effective_date: string | null;
   published_at: string | null;
   discovered_at: string | null;
+  feedback?: "up" | "down" | "watching" | null;
 }
+
+const VOTES: { key: "up" | "down" | "watching"; emoji: string; title: string }[] = [
+  { key: "up", emoji: "👍", title: "Relevant — keep showing bills like this" },
+  { key: "down", emoji: "👎", title: "Noise — hide this bill" },
+  { key: "watching", emoji: "👀", title: "Watching this one" },
+];
 
 const IMPACT: Record<string, { color: string; bg: string; label: string }> = {
   high: { color: "#dc2626", bg: "#fef2f2", label: "HIGH" },
@@ -35,6 +44,24 @@ function formatTopic(tag: string): string {
 export function PolicyItemCard({ item }: { item: PolicyItem }) {
   const impact = IMPACT[item.impact_score] || IMPACT.low;
   const action = item.action_needed ? ACTION[item.action_needed] : null;
+
+  const [fb, setFb] = useState<PolicyItem["feedback"]>(item.feedback ?? null);
+  const [busy, setBusy] = useState(false);
+
+  async function vote(label: "up" | "down" | "watching") {
+    if (busy) return;
+    const prev = fb;
+    setFb(label); // optimistic
+    setBusy(true);
+    try {
+      const r = await fetch(`/api/items/${item.id}/feedback?label=${label}`, { method: "POST" });
+      if (!r.ok) throw new Error(`API ${r.status}`);
+    } catch {
+      setFb(prev); // revert on failure
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <article
@@ -174,6 +201,49 @@ export function PolicyItemCard({ item }: { item: PolicyItem }) {
             ))}
           </div>
         )}
+
+        {/* Feedback: 👍 relevant / 👎 noise / 👀 watching */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            marginTop: 4,
+            paddingTop: 10,
+            borderTop: "1px solid var(--color-border)",
+          }}
+        >
+          {VOTES.map((v) => {
+            const active = fb === v.key;
+            return (
+              <button
+                key={v.key}
+                title={v.title}
+                disabled={busy}
+                onClick={() => vote(v.key)}
+                style={{
+                  fontSize: 14,
+                  lineHeight: 1,
+                  padding: "5px 10px",
+                  borderRadius: 8,
+                  cursor: busy ? "default" : "pointer",
+                  border: `1px solid ${active ? "var(--color-primary)" : "var(--color-border)"}`,
+                  background: active ? "var(--color-primary-soft, #f5f3ff)" : "#fff",
+                  filter: active ? "none" : "grayscale(0.4)",
+                  opacity: busy ? 0.6 : 1,
+                  transition: "all 140ms ease",
+                }}
+              >
+                {v.emoji}
+              </button>
+            );
+          })}
+          {fb === "down" && (
+            <span style={{ fontSize: 11, color: "var(--color-text-subtle)", marginLeft: 2 }}>
+              Hidden on next load
+            </span>
+          )}
+        </div>
       </div>
     </article>
   );

@@ -21,6 +21,7 @@ interface PolicyItem {
   published_at: string | null;
   discovered_at: string | null;
   jurisdiction_id: number | null;
+  feedback?: "up" | "down" | "watching" | null;
 }
 
 interface ApiResponse {
