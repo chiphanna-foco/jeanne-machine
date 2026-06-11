@@ -30,24 +30,31 @@ interface ApiResponse {
   items: PolicyItem[];
 }
 
-type TabKey = "all" | "laws" | "monitor";
+type TabKey = "act" | "monitor" | "fyi" | "all";
 
 const TABS: { key: TabKey; label: string; emoji: string; action_needed?: string; description: string }[] = [
-  { key: "all", label: "Everything", emoji: "📋", description: "All tracked items, regardless of status." },
   {
-    key: "laws",
-    label: "New Laws",
-    emoji: "🆕",
-    action_needed: "inform,urgent",
-    description: "Items the classifier marked as passed law or needing action now.",
+    key: "act",
+    label: "Act Now",
+    emoji: "⚡",
+    action_needed: "urgent",
+    description: "Enacted or imminent laws to handle in the next few months.",
   },
   {
     key: "monitor",
-    label: "To Monitor",
+    label: "Monitor",
     emoji: "👀",
     action_needed: "monitor",
-    description: "In progress — watch these as they move.",
+    description: "Active bills worth watching as they move.",
   },
+  {
+    key: "fyi",
+    label: "FYI",
+    emoji: "🗂️",
+    action_needed: "inform",
+    description: "Dead, postponed, or niche — skim and move on.",
+  },
+  { key: "all", label: "Everything", emoji: "📋", description: "All tracked items, de-duped." },
 ];
 
 export default function Dashboard() {
@@ -55,7 +62,7 @@ export default function Dashboard() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<TabKey>("all");
+  const [tab, setTab] = useState<TabKey>("act");
   const [filters, setFilters] = useState<{
     topic?: string;
     impact?: string;

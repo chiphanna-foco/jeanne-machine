@@ -125,6 +125,27 @@ async def verify_auth(token: str | None = None):
 # ── Policy Items ────────────────────────────────────────────────────
 
 
+def _policy_item_dict(item: "PolicyItem") -> dict:
+    return {
+        "id": item.id,
+        "title": item.title,
+        "summary": item.summary,
+        "impact_score": item.impact_score,
+        "impact_reasoning": item.impact_reasoning,
+        "action_needed": item.action_needed,
+        "topics": item.topic_tags,
+        "source_url": item.source_url,
+        "effective_date": item.effective_date.isoformat() if item.effective_date else None,
+        "published_at": item.published_at.isoformat() if item.published_at else None,
+        "discovered_at": item.discovered_at.isoformat() if item.discovered_at else None,
+        "jurisdiction_id": item.jurisdiction_id,
+    }
+
+
+# Upper bound on rows scanned when de-duping the full filtered set in Python.
+_DEDUPE_SCAN_CAP = 2000
+
+
 @app.get("/api/items")
 async def list_items(
     topic: str | None = None,
@@ -133,6 +154,7 @@ async def list_items(
     state: str | None = None,
     since: str | None = None,
     action_needed: str | None = None,
+    dedupe: bool = Query(default=True),
     limit: int = Query(default=50, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
@@ -142,6 +164,10 @@ async def list_items(
     `action_needed` accepts a single value or comma-separated values, e.g.
     `inform,urgent` to fetch items the classifier flagged as passed laws
     or as needing action now.
+
+    `dedupe` (default true): collapse multiple records of the same bill (e.g.
+    a bill ingested via both LegiScan and Open States) to one, so the list
+    isn't noisy with duplicates. Set false for the raw, un-collapsed list.
     """
     query = select(PolicyItem).order_by(PolicyItem.discovered_at.desc())
 
@@ -166,34 +192,56 @@ async def list_items(
         elif needed_list:
             query = query.where(PolicyItem.action_needed.in_(needed_list))
 
+    if dedupe:
+        # De-dup needs the whole filtered set, so fetch it (capped), collapse by
+        # canonical bill, then paginate in Python for a correct total.
+        from enrichment.triage import dedupe_items
+
+        rows = (await session.execute(query.limit(_DEDUPE_SCAN_CAP))).scalars().all()
+        all_items = [_policy_item_dict(it) for it in rows]
+        deduped, _removed = dedupe_items(all_items)
+        return {
+            "total": len(deduped),
+            "offset": offset,
+            "limit": limit,
+            "items": deduped[offset : offset + limit],
+        }
+
     total_q = select(func.count()).select_from(query.subquery())
     total = (await session.execute(total_q)).scalar() or 0
-
     result = await session.execute(query.offset(offset).limit(limit))
-    items = result.scalars().all()
-
     return {
         "total": total,
         "offset": offset,
         "limit": limit,
-        "items": [
-            {
-                "id": item.id,
-                "title": item.title,
-                "summary": item.summary,
-                "impact_score": item.impact_score,
-                "impact_reasoning": item.impact_reasoning,
-                "action_needed": item.action_needed,
-                "topics": item.topic_tags,
-                "source_url": item.source_url,
-                "effective_date": item.effective_date.isoformat() if item.effective_date else None,
-                "published_at": item.published_at.isoformat() if item.published_at else None,
-                "discovered_at": item.discovered_at.isoformat() if item.discovered_at else None,
-                "jurisdiction_id": item.jurisdiction_id,
-            }
-            for item in items
-        ],
+        "items": [_policy_item_dict(it) for it in result.scalars().all()],
     }
+
+
+@app.get("/api/items/triage")
+async def triage_items(
+    state: str | None = None,
+    horizon_months: int = Query(default=6, ge=1, le=24),
+    session: AsyncSession = Depends(get_session),
+):
+    """Prioritized 'what matters' view: de-duped and bucketed.
+
+    Buckets (from the classifier's action_needed + effective_date horizon):
+      - act_now : urgent — enacted or imminent laws to handle soon
+      - monitor : active bills worth watching
+      - fyi     : dead / postponed / niche — noise you can skim
+
+    Cross-source duplicates of the same bill are collapsed (e.g. a bill seen
+    via both LegiScan and Open States). Optional ?state=co to scope.
+    """
+    from enrichment.triage import triage
+
+    query = select(PolicyItem).order_by(PolicyItem.discovered_at.desc())
+    if state:
+        query = query.join(Jurisdiction).where(Jurisdiction.state_code == state.upper())
+    rows = (await session.execute(query.limit(_DEDUPE_SCAN_CAP))).scalars().all()
+    items = [_policy_item_dict(it) for it in rows]
+    return triage(items, datetime.utcnow(), horizon_months)
 
 
 @app.get("/api/items/{item_id}")
