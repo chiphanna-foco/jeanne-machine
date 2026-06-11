@@ -100,7 +100,33 @@ risk; this makes them loud.
   only where a state's first-party feed is materially better than LegiScan
   (e.g. earlier full text, roll-call detail).
 
-## 6. Risks & mitigations
+## 6. LegiScan house rules & compliance
+
+Straight from the LegiScan API manual — the ones that shape our design:
+
+- **30,000 queries/month, resets the 1st.** v1 spends ~1 query/state/run, so
+  CO alone is ~30/mo and an all-states daily sweep ~1,500/mo — comfortably
+  under. The monthly audit (§4) tracks spend.
+- **Use the hashes. Really.** Phase 3's work loop is `getMasterListRaw` (or
+  `getSearchRaw`) periodically → compare each bill's `change_hash` to the
+  stored one → only `getBill` the changed bills, and never re-download an
+  unchanged document blob. Store `change_hash` + `bill_id`.
+- **`dataset_hash` is the suspension tripwire** — re-downloading an unchanged
+  bulk dataset gets access suspended. We avoid the bulk `getDataset` path
+  entirely (Pull API only), so this doesn't apply. If we ever adopt datasets,
+  gating on `dataset_hash` is mandatory.
+- **Respect timing guidelines** (manual p.7): `getMasterList`/`Raw` ~1h cache,
+  `getBill` ~3h, `getSessionList` daily. Requests inside the cache window
+  return cached data **and still spend a query** — so don't poll faster than
+  the data can change.
+- **Cache responses locally** for replayability (don't re-spend on a re-run).
+- **No front-end scraping; one public key only.** We use the documented Pull
+  API and a single key.
+- **Attribution (CC BY 4.0).** We must credit LegiScan. We store the
+  legiscan.com bill URL on every item; **TODO (web): render a "Data via
+  LegiScan (CC BY 4.0)" credit** on item cards / footer.
+
+## 7. Risks & mitigations
 
 - **LegiScan free-tier limit (30k/mo).** `change_hash` diffing (Phase 3) keeps
   us far under it. The monthly audit also tracks query spend.

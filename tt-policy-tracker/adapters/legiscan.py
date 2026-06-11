@@ -27,6 +27,16 @@ API reference (LegiScan Pull API v1.91):
 Quota optimization via change_hash (skip getBill on unchanged bills) is a
 planned v2 enhancement; v1 ingests masterlist summaries directly and relies
 on the pipeline's content_hash dedup to no-op unchanged re-fetches.
+
+LegiScan house rules honored here (per the API manual):
+  - Every response's ``status`` is checked; non-OK raises (see _get_json).
+  - Spend is minimal: one getMasterList per state per run. We never hit the
+    bulk dataset endpoints, so the dataset_hash suspension rule is moot.
+  - When v2 adds getBill/getBillText, store change_hash and only re-fetch
+    bills whose hash changed, and never re-download an unchanged doc blob.
+  - Attribution: data is licensed CC BY 4.0 and must credit LegiScan. We
+    store the legiscan.com bill URL on every item; the web UI should render
+    a "Data via LegiScan (CC BY 4.0)" credit (tracked in coverage-gap-plan).
 """
 
 import asyncio
