@@ -92,10 +92,16 @@ risk; this makes them loud.
 - **Phase 2 — Audit + onboard gap states.** Run §4 across all 50 states; add
   the worst offenders to `LEGISCAN_STATES`. Expected outcome: most of the
   ~40 states the Open States rotation can't reach daily move to LegiScan.
-- **Phase 3 — LegiScan-primary + change_hash.** Flip LegiScan to the default
-  all-states backbone using `getMasterListRaw` + `change_hash` so we only
-  `getBill` changed bills; demote Open States to cross-check. Retire the
-  fragile rotation/budget machinery.
+- **Phase 3 — getBill enrichment + change_hash (DONE for gap states, PR #40).**
+  The masterlist `description` is often boilerplate (CO HB26-1196 →
+  "Concerning tenant data information"), too thin for the classifier. The
+  adapter now keyword-prescreens the summary and calls `getBill` only on the
+  ~5% housing candidates (34 of 714 for CO), folding the `subjects` tags
+  ("Housing") + action history into raw_text so the classifier has real
+  signal. `change_hash` (embedded in `external_id`) skips getBill on unchanged
+  bills. Next within this phase: flip LegiScan to the default all-states
+  backbone via `getMasterListRaw`, demote Open States to cross-check, retire
+  the rotation/budget machinery.
 - **Phase 4 — Reserve bespoke adapters.** Keep `wa_leg`; add Tier-1 adapters
   only where a state's first-party feed is materially better than LegiScan
   (e.g. earlier full text, roll-call detail).

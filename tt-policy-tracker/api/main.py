@@ -376,6 +376,40 @@ async def pipeline_status(token: str | None = Query(default=None)):
     return _pipeline_status
 
 
+async def _legiscan_seen_change_hashes() -> dict[int, str]:
+    """Map {legiscan_bill_id: change_hash} from prior LegiScan raw docs.
+
+    Lets LegiScanAdapter skip the getBill query for bills that haven't changed
+    since last run. Parsed from external_ids of the form
+    ``legiscan-{bill_id}-{change_hash}``.
+    """
+    from storage.models import SourceAdapter
+
+    seen: dict[int, str] = {}
+    try:
+        async with async_session() as session:
+            sid = (
+                await session.execute(
+                    select(SourceAdapter.id).where(SourceAdapter.name == "legiscan")
+                )
+            ).scalar_one_or_none()
+            if sid is None:
+                return seen
+            rows = await session.execute(
+                select(RawDocument.external_id).where(
+                    RawDocument.source_adapter_id == sid,
+                    RawDocument.external_id.like("legiscan-%"),
+                )
+            )
+            for ext in rows.scalars().all():
+                bid_str, _, ch = ext[len("legiscan-"):].partition("-")
+                if bid_str.isdigit() and ch:
+                    seen[int(bid_str)] = ch
+    except Exception as e:
+        logger.warning(f"legiscan: could not load seen change_hashes: {e}")
+    return seen
+
+
 async def _run_pipeline_task(
     days_back: int,
     batch_size: int,
@@ -403,6 +437,8 @@ async def _run_pipeline_task(
         # States we pull directly from LegiScan (coverage-gap backstop). These
         # are excluded from the Open States sweep below so we don't double-ingest.
         gap_states = settings.legiscan_states_list if settings.legiscan_api_key else []
+        # change_hash cache so LegiScan skips getBill on unchanged bills.
+        ls_seen = await _legiscan_seen_change_hashes() if gap_states else {}
 
         since = datetime.utcnow() - timedelta(days=days_back)
         if states_filter:
@@ -416,7 +452,7 @@ async def _run_pipeline_task(
             # misses on-topic bills like HB26-1196).
             ls_targets = [s for s in states_lower if s in gap_states]
             if ls_targets:
-                adapters.append(LegiScanAdapter(states=ls_targets))
+                adapters.append(LegiScanAdapter(states=ls_targets, seen_change_hashes=ls_seen))
             adapters.append(OpenStatesAdapter(states=states_filter))
         else:
             # Open States sweeps every state EXCEPT the ones LegiScan owns.
@@ -437,7 +473,7 @@ async def _run_pipeline_task(
             ]
             # LegiScan coverage-gap backstop (CO and any other configured gaps).
             if gap_states:
-                adapters.append(LegiScanAdapter(states=gap_states))
+                adapters.append(LegiScanAdapter(states=gap_states, seen_change_hashes=ls_seen))
             if settings.courtlistener_api_token:
                 adapters.append(CourtListenerAdapter())
 
