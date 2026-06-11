@@ -70,37 +70,67 @@ def test_colorado_bill_id_passthrough_when_unparseable():
     assert colorado_bill_id("WEIRD", 2026) == "WEIRD"
 
 
-def test_legiscan_normalize_colorado_bill():
-    adapter = LegiScanAdapter(states=["CO"], api_key="dummy")
-    bill = {
-        "bill_id": 1899123,
-        "number": "HB1196",
-        "change_hash": "abc123",
-        "url": "https://legiscan.com/CO/bill/HB1196/2026",
-        "status_date": "2026-02-10",
-        "status": 1,
-        "last_action_date": "2026-02-12",
-        "last_action": "Introduced In House",
+def _hb1196_detail():
+    """A getBill-shaped payload for CO HB26-1196 (boilerplate description, but a
+    Housing subject tag + action history — the real relevance signal)."""
+    return {
+        "bill_id": 2114530,
+        "change_hash": "abcdef0123456789abcdef0123456789",
+        "session": {"year_start": 2026},
+        "bill_number": "HB1196",
+        "state": "CO",
         "title": "Tenant Data Information",
-        "description": "Concerning protections for tenant screening data.",
+        "description": "Concerning tenant data information.",
+        "subjects": [{"subject_id": 1, "subject_name": "Housing"}],
+        "status": 4,
+        "status_date": "2026-05-20",
+        "url": "https://legiscan.com/CO/bill/HB1196/2026",
+        "state_link": "https://leg.colorado.gov/bills/hb26-1196",
+        "history": [
+            {"date": "2026-02-10", "action": "Introduced In House"},
+            {"date": "2026-05-15", "action": "Sent to the Governor"},
+            {"date": "2026-05-20", "action": "Governor Signed"},
+        ],
     }
-    doc = adapter._normalize(bill, "CO", 2026)
+
+
+def test_legiscan_normalize_detail_folds_subjects_and_history():
+    adapter = LegiScanAdapter(states=["CO"], api_key="dummy")
+    doc = adapter._normalize_detail(_hb1196_detail(), "CO", 2026, "abcdef0123456789abcdef0123456789")
     assert doc is not None
-    assert doc.external_id == "legiscan-1899123"
-    assert doc.state_code == "CO"
-    assert doc.jurisdiction_level == "state"
+    # change_hash embedded in external_id for the seen-cache round-trip.
+    assert doc.external_id == "legiscan-2114530-abcdef0123456789abcdef0123456789"
     # Official CO display id surfaces so a search for "1196"/"HB26-1196" matches.
     assert "HB26-1196" in doc.title
-    assert "Tenant Data Information" in doc.title
-    assert doc.published_at == datetime(2026, 2, 12)
-    assert doc.extra["legiscan_number"] == "HB1196"
-    assert doc.extra["display_id"] == "HB26-1196"
+    # The decisive signals the masterlist lacked are now in the text.
+    assert "Subjects: Housing" in doc.raw_text
+    assert "Governor Signed" in doc.raw_text
+    # Nicer jurisdiction name + official state link preferred.
+    assert doc.jurisdiction_name == "Colorado"
+    assert doc.url == "https://leg.colorado.gov/bills/hb26-1196"
+    assert doc.extra["subjects"] == ["Housing"]
+    assert doc.extra["legiscan_url"] == "https://legiscan.com/CO/bill/HB1196/2026"
+    assert doc.published_at == datetime(2026, 5, 20)
 
 
-def test_legiscan_normalize_skips_incomplete():
+def test_legiscan_normalize_detail_skips_incomplete():
     adapter = LegiScanAdapter(states=["CO"], api_key="dummy")
-    assert adapter._normalize({"bill_id": 1, "number": "", "title": "x"}, "CO", 2026) is None
-    assert adapter._normalize({"bill_id": None, "number": "HB1", "title": "x"}, "CO", 2026) is None
+    assert adapter._normalize_detail({"bill_id": 1, "bill_number": "", "title": "x"}, "CO", 2026, "h") is None
+    assert adapter._normalize_detail({"bill_id": None, "bill_number": "HB1", "title": "x"}, "CO", 2026, "h") is None
+
+
+def test_legiscan_is_candidate_prescreen():
+    # HB26-1196's thin summary still mentions "Tenant" → passes the prescreen,
+    # so it earns a getBill (where the Housing subject confirms relevance).
+    assert LegiScanAdapter._is_candidate(
+        {"number": "HB1196", "title": "Tenant Data Information",
+         "description": "Concerning tenant data information."}
+    ) is True
+    # An off-topic bill with no housing keyword is screened out (no getBill spend).
+    assert LegiScanAdapter._is_candidate(
+        {"number": "HB1000", "title": "Wildfire Mitigation Funding",
+         "description": "Concerning forest management grants."}
+    ) is False
 
 
 def test_legiscan_within_window():
