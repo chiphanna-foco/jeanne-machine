@@ -1621,6 +1621,55 @@ async def admin_os_probe(
     return out
 
 
+@app.get("/admin/reclassify-housing")
+async def reclassify_housing(
+    token: str | None = Query(default=None),
+    limit: int = Query(default=500, le=2000),
+    session: AsyncSession = Depends(get_session),
+):
+    """Re-run enrichment on docs with a curated housing subject tag that the
+    old (pre-override) classifier dropped — i.e. classified, but no PolicyItem.
+
+    Targeted backfill for the subject-override change (the fix for CO
+    HB26-1196). Does NOT post to Slack — safe to run without notifying anyone.
+    Idempotent: a doc that's now relevant gets a PolicyItem; re-running skips
+    docs that already have one.
+
+      GET /admin/reclassify-housing?token=YOUR_TOKEN
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    from enrichment.keywords import has_housing_subject_tag
+    from enrichment.pipeline import enrich_document
+
+    have_item = select(PolicyItem.raw_document_id)
+    q = (
+        select(RawDocument)
+        .where(RawDocument.classified_at.is_not(None))
+        .where(RawDocument.raw_text.like("%Subjects:%"))
+        .where(RawDocument.id.not_in(have_item))
+        .limit(limit)
+    )
+    rows = (await session.execute(q)).scalars().all()
+
+    checked = 0
+    resurfaced = 0
+    for raw in rows:
+        if not has_housing_subject_tag(raw.raw_text or ""):
+            continue
+        checked += 1
+        raw.classified_at = None  # re-open for classification under the override
+        try:
+            item = await enrich_document(session, raw)
+            if item:
+                resurfaced += 1
+        except Exception as e:
+            logger.error(f"reclassify-housing failed for {raw.external_id}: {e}")
+    await session.commit()
+    return {"candidates_with_subject_tag": checked, "newly_surfaced": resurfaced}
+
+
 @app.get("/admin/reset-raw")
 async def reset_raw_documents(
     token: str | None = Query(default=None),

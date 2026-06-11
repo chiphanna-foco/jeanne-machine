@@ -59,3 +59,42 @@ _KEYWORD_RE = re.compile(
 def passes_keyword_prescreen(text: str) -> bool:
     """True if the text mentions any housing-related keyword (merits Haiku)."""
     return bool(_KEYWORD_RE.search(text or ""))
+
+
+# Curated subject tags (e.g. from LegiScan getBill) that, when present, are a
+# STRONG signal a bill is rental-housing relevant — strong enough to override
+# the classifier's deliberate strictness on thin summaries. The LegiScan
+# adapter writes these as a "Subjects: ..." line in raw_text. Unlike a passing
+# keyword in body text, a curated subject is editorial metadata, so trusting it
+# is high-precision. (This is what was missing for CO HB26-1196 "Tenant Data
+# Information": title + description too thin for Haiku, but tagged "Housing".)
+HOUSING_SUBJECTS = [
+    "housing",
+    "landlord",
+    "tenant",
+    "eviction",
+    "rent",            # rent, rental (within a short curated subject line)
+    "lease",
+    "real estate",
+    "mobile home",
+    "manufactured home",
+    "fair housing",
+    "security deposit",
+    "habitability",
+]
+
+# Matches the "Subjects: ..." line the LegiScan adapter writes into raw_text.
+_SUBJECTS_LINE_RE = re.compile(r"^Subjects:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+
+
+def has_housing_subject_tag(text: str) -> bool:
+    """True if the doc carries a curated housing-related subject tag.
+
+    Only fires on the explicit ``Subjects:`` line (curated metadata), not on
+    incidental keyword mentions — so it stays high-precision.
+    """
+    m = _SUBJECTS_LINE_RE.search(text or "")
+    if not m:
+        return False
+    line = m.group(1).lower()
+    return any(s in line for s in HOUSING_SUBJECTS)
