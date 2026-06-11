@@ -14,6 +14,7 @@ from adapters.base import RawDoc
 from config import settings
 from enrichment.classifier import classify_document
 from enrichment.geotagger import geotag_from_adapter
+from enrichment.keywords import has_housing_subject_tag
 from enrichment.summarizer import summarize_document
 from storage.models import (
     Jurisdiction,
@@ -109,7 +110,24 @@ async def enrich_document(session: AsyncSession, raw: RawDocument) -> PolicyItem
     # it whether the classifier said yes or no. The caller commits the
     # session, which persists this even on the no-policy-item path.
     raw.classified_at = datetime.utcnow()
-    if not classification["relevant"] or classification["confidence"] < settings.relevance_confidence_threshold:
+
+    # Strong curated-subject override: a bill tagged with a housing subject
+    # (e.g. LegiScan "Subjects: Housing") is high-precision relevant even when
+    # its summary is too thin for the strict classifier — this is what was
+    # silently dropping CO HB26-1196 "Tenant Data Information". Trust the tag.
+    strong_subject = has_housing_subject_tag(text)
+    relevant = classification["relevant"] or strong_subject
+    passes_confidence = (
+        classification["confidence"] >= settings.relevance_confidence_threshold
+        or strong_subject
+    )
+    if strong_subject and not (
+        classification["relevant"]
+        and classification["confidence"] >= settings.relevance_confidence_threshold
+    ):
+        logger.info(f"Housing-subject override → relevant: {raw.external_id}")
+
+    if not (relevant and passes_confidence):
         logger.info(
             f"Irrelevant (conf={classification['confidence']:.2f}): {raw.external_id}"
         )
