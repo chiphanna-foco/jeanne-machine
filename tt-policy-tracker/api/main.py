@@ -394,10 +394,15 @@ async def _run_pipeline_task(
         from adapters.congress import CongressAdapter
         from adapters.courtlistener import CourtListenerAdapter
         from adapters.federal_register import FederalRegisterAdapter
+        from adapters.legiscan import LegiScanAdapter
         from adapters.legistar import LegistarAdapter
         from adapters.openstates import ALL_STATES, OpenStatesAdapter
         from adapters.wa_leg import WaLegAdapter
         from enrichment.pipeline import enrich_document, ingest_raw_doc
+
+        # States we pull directly from LegiScan (coverage-gap backstop). These
+        # are excluded from the Open States sweep below so we don't double-ingest.
+        gap_states = settings.legiscan_states_list if settings.legiscan_api_key else []
 
         since = datetime.utcnow() - timedelta(days=days_back)
         if states_filter:
@@ -407,9 +412,18 @@ async def _run_pipeline_task(
             # with Open States and may succeed when OS is throttled.
             if "wa" in states_lower:
                 adapters.append(WaLegAdapter())
+            # LegiScan for any requested gap state (e.g. CO, where OS search
+            # misses on-topic bills like HB26-1196).
+            ls_targets = [s for s in states_lower if s in gap_states]
+            if ls_targets:
+                adapters.append(LegiScanAdapter(states=ls_targets))
             adapters.append(OpenStatesAdapter(states=states_filter))
         else:
-            os_states = ALL_STATES if settings.openstates_scope == "all" else None
+            # Open States sweeps every state EXCEPT the ones LegiScan owns.
+            if settings.openstates_scope == "all":
+                os_states = [s for s in ALL_STATES if s not in gap_states]
+            else:
+                os_states = None
             adapters = [
                 # rotate=True: each daily sweep fetches only today's bucket of
                 # states (with a wider window) so we stay under OpenStates'
@@ -421,6 +435,9 @@ async def _run_pipeline_task(
                 FederalRegisterAdapter(),
                 LegistarAdapter(),
             ]
+            # LegiScan coverage-gap backstop (CO and any other configured gaps).
+            if gap_states:
+                adapters.append(LegiScanAdapter(states=gap_states))
             if settings.courtlistener_api_token:
                 adapters.append(CourtListenerAdapter())
 

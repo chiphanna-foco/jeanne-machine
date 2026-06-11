@@ -35,6 +35,17 @@ class Settings(BaseSettings):
     # limit from 25 to 500). Works without a key at the lower limit.
     bls_api_key: str = ""
 
+    # LegiScan — free public API key from legiscan.com/legiscan (30,000
+    # queries/month, ~4x Open States' 250/day). Covers all 50 states + DC +
+    # Congress via one key. Used as the coverage-gap backstop for states whose
+    # bills don't surface through Open States (e.g. Colorado / HB26-1196) and,
+    # longer-term, as the primary low-quota multi-state source.
+    legiscan_api_key: str = ""
+    # Two-letter states pulled directly from LegiScan each run, comma-separated.
+    # These are EXCLUDED from the Open States sweep to avoid double-ingesting.
+    # Starts with the documented Open States gap (CO); expand as gaps are found.
+    legiscan_states: str = "CO"
+
     # Open States scope — "phase0" (OH + CO only) or "all" (all 50 states)
     openstates_scope: str = "all"
 
@@ -90,6 +101,11 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def legiscan_states_list(self) -> list[str]:
+        """Lowercase two-letter states LegiScan handles directly (gap states)."""
+        return [s.strip().lower() for s in self.legiscan_states.split(",") if s.strip()]
 
 
 settings = Settings()
