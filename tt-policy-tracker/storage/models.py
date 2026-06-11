@@ -239,3 +239,33 @@ class CpiReading(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
+
+class ItemFeedback(Base):
+    """A 👍 / 👎 / 👀 signal on a tracked bill.
+
+    Append-only (one row per click) so the history is auditable, like the
+    TT-LLM signal_layer feedback log. The latest row per ``bill_key`` wins.
+
+    Keyed on ``bill_key`` — the canonical, source-independent bill identity
+    (e.g. ``CO:HB1045:2026`` from enrichment.triage.canonical_bill_key) — NOT
+    on policy_item.id. policy_item.id changes every time a bill is
+    re-classified (new raw doc → new PolicyItem row), so id-keyed feedback
+    would orphan itself on the next pipeline run. bill_key is stable across
+    re-runs, so a thumbs-down stays suppressed. item_id is kept only for
+    reference/debugging.
+    """
+
+    __tablename__ = "item_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    bill_key: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    # 'up' (relevant/useful) | 'down' (noise — suppress) | 'watching'
+    label: Mapped[str] = mapped_column(
+        Enum("up", "down", "watching", name="feedback_label"), nullable=False
+    )
+    note: Mapped[str | None] = mapped_column(Text)
+    item_id: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+

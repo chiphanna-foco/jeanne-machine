@@ -146,6 +146,30 @@ def _policy_item_dict(item: "PolicyItem") -> dict:
 _DEDUPE_SCAN_CAP = 2000
 
 
+async def _latest_feedback(session: AsyncSession, state: str | None = None) -> dict[str, str]:
+    """{bill_key: latest_label} from the append-only item_feedback log.
+
+    Last write per bill_key wins. Optional `state` filters by the CO:/WA:
+    prefix the canonical bill key carries.
+    """
+    from storage.models import ItemFeedback
+
+    rows = (
+        await session.execute(
+            select(ItemFeedback.bill_key, ItemFeedback.label).order_by(
+                ItemFeedback.created_at.asc()
+            )
+        )
+    ).all()
+    prefix = f"{state.upper()}:" if state else None
+    fb: dict[str, str] = {}
+    for bill_key, label in rows:
+        if prefix and not bill_key.upper().startswith(prefix):
+            continue
+        fb[bill_key] = label
+    return fb
+
+
 @app.get("/api/items")
 async def list_items(
     topic: str | None = None,
@@ -155,6 +179,7 @@ async def list_items(
     since: str | None = None,
     action_needed: str | None = None,
     dedupe: bool = Query(default=True),
+    include_dismissed: bool = Query(default=False),
     limit: int = Query(default=50, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
@@ -194,28 +219,34 @@ async def list_items(
 
     if dedupe:
         # De-dup needs the whole filtered set, so fetch it (capped), collapse by
-        # canonical bill, then paginate in Python for a correct total.
+        # canonical bill, suppress 👎'd bills, then paginate for a correct total.
+        from enrichment.feedback import annotate_and_suppress
         from enrichment.triage import dedupe_items
 
         rows = (await session.execute(query.limit(_DEDUPE_SCAN_CAP))).scalars().all()
         all_items = [_policy_item_dict(it) for it in rows]
         deduped, _removed = dedupe_items(all_items)
+        fb = await _latest_feedback(session)
+        visible = annotate_and_suppress(deduped, fb, include_dismissed)
         return {
-            "total": len(deduped),
+            "total": len(visible),
             "offset": offset,
             "limit": limit,
-            "items": deduped[offset : offset + limit],
+            "items": visible[offset : offset + limit],
         }
 
+    # Raw, un-collapsed view: show every record (incl. dismissed), tagged with
+    # its current label but not suppressed.
     total_q = select(func.count()).select_from(query.subquery())
     total = (await session.execute(total_q)).scalar() or 0
     result = await session.execute(query.offset(offset).limit(limit))
-    return {
-        "total": total,
-        "offset": offset,
-        "limit": limit,
-        "items": [_policy_item_dict(it) for it in result.scalars().all()],
-    }
+    fb = await _latest_feedback(session)
+    from enrichment.feedback import annotate_and_suppress
+
+    items = annotate_and_suppress(
+        [_policy_item_dict(it) for it in result.scalars().all()], fb, include_dismissed=True
+    )
+    return {"total": total, "offset": offset, "limit": limit, "items": items}
 
 
 @app.get("/api/items/triage")
@@ -232,16 +263,69 @@ async def triage_items(
       - fyi     : dead / postponed / niche — noise you can skim
 
     Cross-source duplicates of the same bill are collapsed (e.g. a bill seen
-    via both LegiScan and Open States). Optional ?state=co to scope.
+    via both LegiScan and Open States), and 👎'd bills are suppressed.
+    Optional ?state=co to scope.
     """
+    from enrichment.feedback import annotate_and_suppress
     from enrichment.triage import triage
 
     query = select(PolicyItem).order_by(PolicyItem.discovered_at.desc())
     if state:
         query = query.join(Jurisdiction).where(Jurisdiction.state_code == state.upper())
     rows = (await session.execute(query.limit(_DEDUPE_SCAN_CAP))).scalars().all()
-    items = [_policy_item_dict(it) for it in rows]
+    fb = await _latest_feedback(session, state)
+    items = annotate_and_suppress([_policy_item_dict(it) for it in rows], fb)
     return triage(items, datetime.utcnow(), horizon_months)
+
+
+@app.post("/api/items/{item_id}/feedback")
+async def submit_feedback(
+    item_id: int,
+    label: str,
+    note: str | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    """Record a 👍 / 👎 / 👀 on an item.
+
+    Stored against the item's *canonical bill key* (stable across re-runs),
+    not policy_item.id, so a 👎 keeps suppressing the bill after re-ingest.
+      POST /api/items/137/feedback?label=down
+    """
+    from enrichment.triage import canonical_bill_key
+    from storage.models import ItemFeedback
+
+    if label not in ("up", "down", "watching"):
+        return JSONResponse(
+            status_code=400, content={"error": "label must be one of up|down|watching"}
+        )
+    item = (
+        await session.execute(select(PolicyItem).where(PolicyItem.id == item_id))
+    ).scalar_one_or_none()
+    if item is None:
+        return JSONResponse(status_code=404, content={"error": "item not found"})
+
+    bill_key = canonical_bill_key(item.source_url) or f"item:{item_id}"
+    session.add(ItemFeedback(bill_key=bill_key, label=label, note=note, item_id=item_id))
+    await session.commit()
+    return {"ok": True, "bill_key": bill_key, "label": label}
+
+
+@app.get("/api/feedback/precision")
+async def feedback_precision(
+    state: str | None = None, session: AsyncSession = Depends(get_session)
+):
+    """Trust metric: up / (up + down) over the latest label per bill."""
+    from collections import Counter
+
+    from enrichment.feedback import precision
+
+    fb = await _latest_feedback(session, state)
+    labels = list(fb.values())
+    return {
+        "precision": precision(labels),
+        "counts": dict(Counter(labels)),
+        "bills_rated": len(fb),
+    }
 
 
 @app.get("/api/items/{item_id}")
