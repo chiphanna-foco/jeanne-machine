@@ -1705,6 +1705,70 @@ async def reclassify_housing(
     return {"candidates_with_subject_tag": checked, "newly_surfaced": resurfaced}
 
 
+@app.get("/admin/legiscan-trace")
+async def legiscan_trace(
+    bill_id: int,
+    heal: bool = Query(default=False),
+    token: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Trace a LegiScan bill through the pipeline (audit.py is OpenStates-only).
+
+    Shows every raw doc for the bill (external_id prefix legiscan-{bill_id}),
+    its classification state, and any PolicyItem — the ground truth for
+    "where did this bill go?".
+
+    `heal=true`: for docs that are STUCK (classified, no PolicyItem), re-run
+    enrichment now under current classifier logic. Does not post to Slack.
+
+      GET /admin/legiscan-trace?bill_id=2114530&token=...
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    from enrichment.pipeline import enrich_document
+
+    rows = (
+        await session.execute(
+            select(RawDocument).where(
+                RawDocument.external_id.like(f"legiscan-{bill_id}%")
+            )
+        )
+    ).scalars().all()
+
+    out = []
+    for raw in rows:
+        item = (
+            await session.execute(
+                select(PolicyItem).where(PolicyItem.raw_document_id == raw.id)
+            )
+        ).scalar_one_or_none()
+        entry = {
+            "raw_id": raw.id,
+            "external_id": raw.external_id,
+            "classified": raw.classified_at.isoformat() if raw.classified_at else None,
+            "has_subjects_line": "Subjects:" in (raw.raw_text or ""),
+            "raw_text_head": (raw.raw_text or "")[:300],
+            "item_id": item.id if item else None,
+            "item_title": item.title if item else None,
+            "healed": None,
+        }
+        if heal and raw.classified_at is not None and item is None:
+            raw.classified_at = None
+            try:
+                new_item = await enrich_document(session, raw)
+                entry["healed"] = {
+                    "created_item_id": new_item.id if new_item else None,
+                    "verdict": "relevant" if new_item else "irrelevant",
+                }
+            except Exception as e:
+                entry["healed"] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+        out.append(entry)
+    if heal:
+        await session.commit()
+    return {"bill_id": bill_id, "raw_docs": len(out), "docs": out}
+
+
 @app.get("/admin/reset-raw")
 async def reset_raw_documents(
     token: str | None = Query(default=None),
