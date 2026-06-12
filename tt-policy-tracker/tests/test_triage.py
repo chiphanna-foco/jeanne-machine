@@ -93,15 +93,28 @@ def test_triage_item_horizon_classification():
     assert far["horizon"] == "future"
 
 
-def test_effective_date_sort_soonest_first_undated_last():
-    from enrichment.triage import effective_date_sort_key
+def test_effective_date_sort_future_first_then_recent_past_then_undated():
+    from enrichment.triage import make_effective_sort_key
 
+    key = make_effective_sort_key(datetime(2026, 6, 12))
     items = [
         {"id": 1, "effective_date": None, "discovered_at": "2026-06-10T00:00:00"},
-        {"id": 2, "effective_date": "2026-09-01T00:00:00"},
-        {"id": 3, "effective_date": "2026-07-01T00:00:00"},
+        {"id": 2, "effective_date": "2026-09-01T00:00:00"},  # upcoming, later
+        {"id": 3, "effective_date": "2026-07-01T00:00:00"},  # upcoming, soonest
         {"id": 4, "effective_date": None, "discovered_at": "2026-06-11T00:00:00"},
+        {"id": 5, "effective_date": "2016-07-29T00:00:00"},  # ancient — must NOT lead
+        {"id": 6, "effective_date": "2026-05-01T00:00:00"},  # recently effective
     ]
-    ordered = sorted(items, key=effective_date_sort_key)
-    # Dated soonest-first, then undated newest-discovered-first.
-    assert [i["id"] for i in ordered] == [3, 2, 4, 1]
+    ordered = sorted(items, key=key)
+    # Upcoming soonest-first -> recently-effective (newest first) -> undated
+    # (newest discovered first). The 2016 law lands near the bottom, not #1.
+    assert [i["id"] for i in ordered] == [3, 2, 6, 5, 4, 1]
+
+
+def test_effective_date_sort_today_counts_as_upcoming():
+    from enrichment.triage import make_effective_sort_key
+
+    key = make_effective_sort_key(datetime(2026, 6, 12, 15, 30))
+    today_item = {"id": 1, "effective_date": "2026-06-12T00:00:00"}
+    past_item = {"id": 2, "effective_date": "2026-06-11T00:00:00"}
+    assert sorted([past_item, today_item], key=key)[0]["id"] == 1

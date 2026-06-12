@@ -191,21 +191,18 @@ async def list_items(
     `inform,urgent` to fetch items the classifier flagged as passed laws
     or as needing action now.
 
-    `sort`: "discovered" (default, newest first) or "effective" — soonest
-    day-it-goes-into-law first; items with no effective date sort last.
+    `sort`: "discovered" (default, newest first) or "effective" — what's about
+    to become binding: upcoming effective dates soonest-first, then recently
+    effective (newest first), then undated watchlist items. NOT a plain date
+    ascension — that would surface decade-old laws first.
 
     `dedupe` (default true): collapse multiple records of the same bill (e.g.
     a bill ingested via both LegiScan and Open States) to one, so the list
     isn't noisy with duplicates. Set false for the raw, un-collapsed list.
     """
-    if sort == "effective":
-        # Soonest-binding first; undated bills last (newest-discovered there).
-        query = select(PolicyItem).order_by(
-            PolicyItem.effective_date.asc().nulls_last(),
-            PolicyItem.discovered_at.desc(),
-        )
-    else:
-        query = select(PolicyItem).order_by(PolicyItem.discovered_at.desc())
+    # Both sort modes fetch in discovered order; "effective" is applied in
+    # Python below (future-first grouping doesn't map cleanly to one ORDER BY).
+    query = select(PolicyItem).order_by(PolicyItem.discovered_at.desc())
 
     if topic:
         query = query.where(PolicyItem.topic_tags.contains([topic]))
@@ -232,7 +229,7 @@ async def list_items(
         # De-dup needs the whole filtered set, so fetch it (capped), collapse by
         # canonical bill, suppress 👎'd bills, then paginate for a correct total.
         from enrichment.feedback import annotate_and_suppress
-        from enrichment.triage import dedupe_items, effective_date_sort_key
+        from enrichment.triage import dedupe_items, make_effective_sort_key
 
         rows = (await session.execute(query.limit(_DEDUPE_SCAN_CAP))).scalars().all()
         all_items = [_policy_item_dict(it) for it in rows]
@@ -240,8 +237,7 @@ async def list_items(
         fb = await _latest_feedback(session)
         visible = annotate_and_suppress(deduped, fb, include_dismissed)
         if sort == "effective":
-            # Re-sort after dedup so winner-swaps can't perturb the order.
-            visible.sort(key=effective_date_sort_key)
+            visible.sort(key=make_effective_sort_key(datetime.utcnow()))
         return {
             "total": len(visible),
             "offset": offset,
@@ -251,12 +247,22 @@ async def list_items(
 
     # Raw, un-collapsed view: show every record (incl. dismissed), tagged with
     # its current label but not suppressed.
+    from enrichment.feedback import annotate_and_suppress
+    from enrichment.triage import make_effective_sort_key
+
     total_q = select(func.count()).select_from(query.subquery())
     total = (await session.execute(total_q)).scalar() or 0
+    if sort == "effective":
+        rows = (await session.execute(query.limit(_DEDUPE_SCAN_CAP))).scalars().all()
+        fb = await _latest_feedback(session)
+        items = annotate_and_suppress(
+            [_policy_item_dict(it) for it in rows], fb, include_dismissed=True
+        )
+        items.sort(key=make_effective_sort_key(datetime.utcnow()))
+        return {"total": total, "offset": offset, "limit": limit,
+                "items": items[offset : offset + limit]}
     result = await session.execute(query.offset(offset).limit(limit))
     fb = await _latest_feedback(session)
-    from enrichment.feedback import annotate_and_suppress
-
     items = annotate_and_suppress(
         [_policy_item_dict(it) for it in result.scalars().all()], fb, include_dismissed=True
     )
