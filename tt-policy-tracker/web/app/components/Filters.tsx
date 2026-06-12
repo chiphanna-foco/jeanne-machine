@@ -34,9 +34,14 @@ const inputStyle: React.CSSProperties = {
   transition: "border-color 160ms ease, box-shadow 160ms ease",
 };
 
+const SORTS = [
+  { value: "", label: "Sort: Newest first" },
+  { value: "effective", label: "Sort: Goes into law soonest" },
+];
+
 interface FiltersProps {
-  filters: { topic?: string; impact?: string; state?: string };
-  onChange: (filters: { topic?: string; impact?: string; state?: string }) => void;
+  filters: { topic?: string; impact?: string; state?: string; sort?: string };
+  onChange: (filters: { topic?: string; impact?: string; state?: string; sort?: string }) => void;
 }
 
 export function Filters({ filters, onChange }: FiltersProps) {
@@ -89,9 +94,21 @@ export function Filters({ filters, onChange }: FiltersProps) {
         style={{ ...inputStyle, width: 140 }}
       />
 
+      <select
+        style={{ ...inputStyle, cursor: "pointer" }}
+        value={filters.sort || ""}
+        onChange={(e) => onChange({ ...filters, sort: e.target.value || undefined })}
+      >
+        {SORTS.map((s) => (
+          <option key={s.value} value={s.value}>
+            {s.label}
+          </option>
+        ))}
+      </select>
+
       {hasFilters && (
         <button
-          onClick={() => onChange({})}
+          onClick={() => onChange({ sort: filters.sort })}
           style={{
             padding: "6px 12px",
             fontSize: 12,
