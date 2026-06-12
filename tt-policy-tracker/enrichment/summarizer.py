@@ -20,14 +20,17 @@ Given a government document (bill, regulation, meeting minutes, or court ruling)
 
 Guidelines:
 - Title: ≤90 characters, action-oriented (e.g. "Colorado Proposes 60-Day Security Deposit Return Requirement")
-- Summary: 2-3 sentences in plain English. Name the jurisdiction and describe the specific change.
+- Summary: 1-2 SHORT sentences in plain English. Name the jurisdiction and the specific change. The reader is busy — no filler.
 - Impact score: "low" = minor procedural change, "med" = material change to landlord obligations in some jurisdictions, "high" = significant new restriction or requirement affecting many landlords.
 - Impact reasoning: One sentence explaining why this matters to a SMALL landlord (1-5 units). If the law sets an applicability threshold — e.g. exempts owner-occupied buildings or applies only to landlords above N units — say so here explicitly, since that determines whether TurboTenant's customers are even covered.
 - Topics: One or more from this fixed list:
   landlord_tenant_law, security_deposit, eviction, source_of_income,
   rental_registration, screening_restrictions, application_fee_limit,
   rent_control, habitability, fair_housing
-- Action needed: "inform" = FYI only, "monitor" = track for updates, "urgent" = immediate impact or effective date within 90 days.
+- Action needed — this drives whether the legal team gets pinged, so apply the time-horizon rule strictly:
+  - "urgent" = ALREADY BINDING or imminent: enacted/signed/adopted, or an effective date within ~6 months. Legal must look at this now.
+  - "monitor" = actively moving (passed a chamber, on the governor's desk) AND could bind landlords within ~6 months if it passes.
+  - "inform" = everything early-stage or speculative: just introduced, in committee, dead/postponed/vetoed, or — even if it eventually passed — there would still be 6+ months to react. Do NOT mark these urgent; they are watchlist items, not alerts.
 - Effective date: ISO date if mentioned, otherwise null.
 
 Respond with ONLY valid JSON (no markdown):

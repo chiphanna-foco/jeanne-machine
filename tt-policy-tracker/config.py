@@ -27,6 +27,10 @@ class Settings(BaseSettings):
 
     # Slack — set SLACK_WEBHOOK_URL to an incoming webhook URL for Slack digests
     slack_webhook_url: str = ""
+    # Max act-now items per Slack alert; overflow is summarized in one footer
+    # line and lives in the dashboard. Keeps a backfill from blasting 50 states
+    # at once at the legal team.
+    slack_max_alert_items: int = 8
 
     # CourtListener — free API token from courtlistener.com
     courtlistener_api_token: str = ""

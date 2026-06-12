@@ -55,6 +55,17 @@ ANALYSIS    getBill for new/changed matches (subjects, history, official link)
 PRECISION   the human layer: triage buckets (act_now/monitor/fyi),
             cross-source dedup, 👍/👎/👀 feedback with suppression and a
             precision metric. Noise costs one click and never returns.
+
+ALERTING    enrichment/alerting.py — recall-first INGEST, act-now ALERTS.
+            Slack pings only what binds landlords within ~3-6 months (urgent
+            label or effective date in [today-90d, today+180d]); speculative
+            bills with 6+ months of runway are tracked silently. Compact
+            one-line format, capped per run (SLACK_MAX_ALERT_ITEMS, default 8)
+            so a 50-state backfill drains over runs instead of blasting.
+            /admin/cron-search runs the search sweep every 2 hours
+            (.github/workflows/cron-search.yml) — LegiScan's search cache
+            refreshes hourly, so 2h is "as often as useful"; a quiet run
+            costs ~16 queries; the endpoint self-skips if a run is active.
 ```
 
 Key recall properties:
