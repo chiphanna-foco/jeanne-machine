@@ -520,16 +520,18 @@ async def _legiscan_seen_change_hashes() -> dict[int, str]:
     seen: dict[int, str] = {}
     try:
         async with async_session() as session:
-            sid = (
+            sids = (
                 await session.execute(
-                    select(SourceAdapter.id).where(SourceAdapter.name == "legiscan")
+                    select(SourceAdapter.id).where(
+                        SourceAdapter.name.in_(["legiscan", "legiscan_search"])
+                    )
                 )
-            ).scalar_one_or_none()
-            if sid is None:
+            ).scalars().all()
+            if not sids:
                 return seen
             rows = await session.execute(
                 select(RawDocument.external_id).where(
-                    RawDocument.source_adapter_id == sid,
+                    RawDocument.source_adapter_id.in_(sids),
                     RawDocument.external_id.like("legiscan-%"),
                 )
             )
@@ -540,6 +542,62 @@ async def _legiscan_seen_change_hashes() -> dict[int, str]:
     except Exception as e:
         logger.warning(f"legiscan: could not load seen change_hashes: {e}")
     return seen
+
+
+async def _push_act_now_alerts(new_item_ids: list[int], results: dict) -> None:
+    """Slack only what binds landlords within ~3-6 months — capped and compact.
+
+    Policy (TurboTenant, 2026-06-11): alert on urgent/effective-soon items;
+    everything else is tracked silently in the dashboard watchlist. The
+    per-run cap keeps a backfill from blasting 50 states at the legal team —
+    overflow is one footer line and drains across subsequent runs.
+    """
+    try:
+        from digest.slack import build_alert_blocks, send_to_slack
+        from enrichment.alerting import alert_sort_key, should_alert
+        from enrichment.triage import dedupe_items
+
+        async with async_session() as session:
+            rows = await session.execute(
+                select(PolicyItem).where(PolicyItem.id.in_(new_item_ids))
+            )
+            new_items = [_policy_item_dict(it) for it in rows.scalars().all()]
+
+        deduped, _ = dedupe_items(new_items)
+        now = datetime.utcnow()
+        alertable = sorted(
+            (
+                it for it in deduped
+                if should_alert(
+                    it.get("action_needed"),
+                    datetime.fromisoformat(it["effective_date"]) if it.get("effective_date") else None,
+                    now,
+                )
+            ),
+            key=alert_sort_key,
+        )
+        tracked = len(deduped) - len(alertable)
+        capped = alertable[: settings.slack_max_alert_items]
+        overflow = len(alertable) - len(capped)
+
+        results["slack_item_count"] = len(capped)
+        results["slack_tracked_quietly"] = tracked + overflow
+        if capped:
+            blocks = build_alert_blocks(capped, tracked_count=tracked + overflow)
+            fallback = (
+                f"TT Policy Tracker — {len(capped)} law update"
+                f"{'s' if len(capped) != 1 else ''} needing attention"
+            )
+            ok = await send_to_slack(settings.slack_webhook_url, blocks, fallback_text=fallback)
+            results["slack_sent"] = ok
+            if not ok:
+                results["errors"].append("Slack webhook send failed")
+        else:
+            # Nothing act-now this run — stay quiet. Silence is a feature.
+            results["slack_sent"] = False
+    except Exception as e:
+        results["errors"].append(f"slack stage: {type(e).__name__}: {str(e)[:300]}")
+        logger.error(f"Slack push failed: {e}", exc_info=True)
 
 
 async def _run_pipeline_task(
@@ -561,6 +619,7 @@ async def _run_pipeline_task(
         from adapters.courtlistener import CourtListenerAdapter
         from adapters.federal_register import FederalRegisterAdapter
         from adapters.legiscan import LegiScanAdapter
+        from adapters.legiscan_search import LegiScanSearchAdapter
         from adapters.legistar import LegistarAdapter
         from adapters.openstates import ALL_STATES, OpenStatesAdapter
         from adapters.wa_leg import WaLegAdapter
@@ -570,7 +629,7 @@ async def _run_pipeline_task(
         # are excluded from the Open States sweep below so we don't double-ingest.
         gap_states = settings.legiscan_states_list if settings.legiscan_api_key else []
         # change_hash cache so LegiScan skips getBill on unchanged bills.
-        ls_seen = await _legiscan_seen_change_hashes() if gap_states else {}
+        ls_seen = await _legiscan_seen_change_hashes() if settings.legiscan_api_key else {}
 
         since = datetime.utcnow() - timedelta(days=days_back)
         if states_filter:
@@ -603,9 +662,12 @@ async def _run_pipeline_task(
                 FederalRegisterAdapter(),
                 LegistarAdapter(),
             ]
-            # LegiScan coverage-gap backstop (CO and any other configured gaps).
-            if gap_states:
-                adapters.append(LegiScanAdapter(states=gap_states, seen_change_hashes=ls_seen))
+            # PRIMARY state-bill discovery: LegiScan full-text search, national.
+            # Standing queries over their index find bills whose summaries are
+            # too thin for us to filter on (the HB26-1196 class of miss). The
+            # per-state masterlist adapter remains for targeted ?state= runs.
+            if settings.legiscan_api_key:
+                adapters.append(LegiScanSearchAdapter(seen_change_hashes=ls_seen))
             if settings.courtlistener_api_token:
                 adapters.append(CourtListenerAdapter())
 
@@ -665,36 +727,9 @@ async def _run_pipeline_task(
                 logger.error(err)
                 results["errors"].append(err)
 
-        # ── Step 3: Slack push if any new items ──
+        # ── Step 3: Slack push — act-now items only, capped, compact ──
         if new_item_ids and settings.slack_webhook_url:
-            try:
-                from digest.slack import build_slack_blocks, send_to_slack
-
-                async with async_session() as session:
-                    rows = await session.execute(
-                        select(PolicyItem)
-                        .where(PolicyItem.id.in_(new_item_ids))
-                        .order_by(
-                            PolicyItem.impact_score.desc(),
-                            PolicyItem.discovered_at.desc(),
-                        )
-                    )
-                    items = list(rows.scalars().all())
-
-                date_range = datetime.utcnow().strftime("%b %d, %Y")
-                blocks = build_slack_blocks(items, frequency="search", date_range=date_range)
-                fallback = (
-                    f"TT Policy Tracker — {len(items)} new item"
-                    f"{'s' if len(items) != 1 else ''}"
-                )
-                ok = await send_to_slack(settings.slack_webhook_url, blocks, fallback_text=fallback)
-                results["slack_sent"] = ok
-                results["slack_item_count"] = len(items)
-                if not ok:
-                    results["errors"].append("Slack webhook send failed")
-            except Exception as e:
-                results["errors"].append(f"slack stage: {type(e).__name__}: {str(e)[:300]}")
-                logger.error(f"Slack push from pipeline failed: {e}", exc_info=True)
+            await _push_act_now_alerts(new_item_ids, results)
 
     except Exception as e:
         results["errors"].append(f"pipeline error: {str(e)}")
@@ -1710,6 +1745,85 @@ async def cron_daily(token: str | None = Query(default=None)):
 
     asyncio.create_task(_run_pipeline_task(days_back=3, batch_size=300))
     return {"status": "started", "message": "Daily cron pipeline started (3 days back, 300 enrichment batch)."}
+
+
+async def _run_search_sweep_task():
+    """Frequent lightweight sweep: LegiScan full-text search only.
+
+    Unlike the daily full pipeline, this touches NO other source (no Open
+    States budget burn), so it can run every couple of hours — LegiScan's
+    search cache refreshes hourly, and change_hash makes a quiet run cost
+    just the ~16 standing search queries. Each run: search → ingest →
+    enrich exactly what was ingested → capped act-now Slack push.
+    """
+    global _pipeline_status
+    _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
+    results = {"ingested": 0, "enriched": 0, "irrelevant": 0, "errors": []}
+    new_item_ids: list[int] = []
+    try:
+        from adapters.legiscan_search import LegiScanSearchAdapter
+        from enrichment.pipeline import enrich_document, ingest_raw_doc
+
+        ls_seen = await _legiscan_seen_change_hashes()
+        adapter = LegiScanSearchAdapter(seen_change_hashes=ls_seen)
+        docs = await adapter.fetch_new_items(datetime.utcnow())
+
+        new_raw_ids: list[int] = []
+        async with async_session() as session:
+            for doc in docs:
+                raw = await ingest_raw_doc(session, doc)
+                if raw:
+                    results["ingested"] += 1
+                    new_raw_ids.append(raw.id)
+            await session.commit()
+        results["legiscan_search_stats"] = adapter.last_run_stats.get("_totals", {})
+
+        # Enrich exactly what this sweep ingested — nothing waits for a batch.
+        for raw_id in new_raw_ids:
+            try:
+                async with async_session() as session:
+                    raw = await session.get(RawDocument, raw_id)
+                    if not raw:
+                        continue
+                    item = await enrich_document(session, raw)
+                    if item:
+                        results["enriched"] += 1
+                        new_item_ids.append(item.id)
+                    else:
+                        results["irrelevant"] += 1
+                    await session.commit()
+            except Exception as e:
+                results["errors"].append(f"enrich raw_id={raw_id}: {type(e).__name__}: {str(e)[:200]}")
+
+        if new_item_ids and settings.slack_webhook_url:
+            await _push_act_now_alerts(new_item_ids, results)
+    except Exception as e:
+        results["errors"].append(f"search sweep error: {str(e)}")
+        logger.error(f"Search sweep failed: {e}", exc_info=True)
+
+    _pipeline_status = {
+        "running": False,
+        "last_run": datetime.utcnow().isoformat(),
+        "last_result": results,
+    }
+
+
+@app.get("/admin/cron-search")
+async def cron_search(token: str | None = Query(default=None)):
+    """Frequent cron: the LegiScan full-text search sweep (see task above).
+
+      GET /admin/cron-search?token=YOUR_TOKEN
+
+    Safe to call every 1-2 hours. Skips if a pipeline is already running so
+    overlapping crons can't pile up.
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+    if _pipeline_status.get("running"):
+        return {"status": "skipped", "message": "A pipeline run is already in progress."}
+
+    asyncio.create_task(_run_search_sweep_task())
+    return {"status": "started", "message": "Search sweep started. Progress via /admin/pipeline-status."}
 
 
 @app.get("/admin/cron-effective-alerts")

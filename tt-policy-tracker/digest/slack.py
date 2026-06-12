@@ -138,6 +138,60 @@ def build_slack_blocks(items: list[PolicyItem], frequency: str, date_range: str)
     return blocks
 
 
+def build_alert_blocks(
+    items: list[dict],
+    tracked_count: int = 0,
+    dashboard_url: str = "https://jeanne-machine.vercel.app",
+) -> list[dict]:
+    """Compact act-now alert: one line per law, built for a busy legal team.
+
+    `items` are alert-gated dicts (see enrichment.alerting) with keys:
+    title, source_url, impact_score, effective_date, impact_reasoning.
+    `tracked_count` = items ingested this run but NOT alerted (watchlist) —
+    surfaced as a one-line footer so nothing feels hidden.
+    """
+    n = len(items)
+    blocks: list[dict] = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"⚖️ *{n} law update{'s' if n != 1 else ''} needing attention*",
+            },
+        }
+    ]
+
+    lines = []
+    for it in items:
+        emoji = IMPACT_EMOJI.get(it.get("impact_score"), "•")
+        title = _truncate(it.get("title") or "", 150)
+        if it.get("source_url"):
+            title = f"<{it['source_url']}|{title}>"
+        eff = it.get("effective_date")
+        eff_part = f" — effective {str(eff)[:10]}" if eff else ""
+        line = f"{emoji} {title}{eff_part}"
+        why = (it.get("impact_reasoning") or "").strip()
+        if why:
+            line += f"\n        _{_truncate(why, 160)}_"
+        lines.append(line)
+    if lines:
+        blocks.append(
+            {"type": "section", "text": {"type": "mrkdwn", "text": _truncate("\n".join(lines))}}
+        )
+
+    footer_bits = []
+    if tracked_count:
+        footer_bits.append(f"{tracked_count} more tracked on the watchlist (not urgent)")
+    footer_bits.append(f"<{dashboard_url}|dashboard>")
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": " · ".join(footer_bits)}],
+        }
+    )
+    return blocks
+
+
 async def send_to_slack(webhook_url: str, blocks: list[dict], fallback_text: str = "TT Policy Tracker digest") -> bool:
     """POST a message with blocks to a Slack incoming webhook."""
     if not webhook_url:

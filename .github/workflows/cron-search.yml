@@ -1,0 +1,28 @@
+# Frequent LegiScan full-text search sweep — the recall-first discovery loop.
+# Every 2 hours: LegiScan's search cache refreshes hourly, so this is as often
+# as is useful without spending queries on cached data. The endpoint skips
+# itself if a pipeline run is already in progress, so overlap can't pile up.
+# Requires repo secrets API_BASE_URL and ADMIN_TOKEN.
+name: Search sweep
+
+on:
+  schedule:
+    - cron: "15 */2 * * *"
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit /admin/cron-search
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${API_BASE_URL:-}" ] || [ -z "${ADMIN_TOKEN:-}" ]; then
+            echo "Missing API_BASE_URL or ADMIN_TOKEN repo secret" >&2
+            exit 1
+          fi
+          curl -sS --fail-with-body --max-time 30 \
+            "${API_BASE_URL%/}/admin/cron-search?token=${ADMIN_TOKEN}"
