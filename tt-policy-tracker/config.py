@@ -46,6 +46,16 @@ class Settings(BaseSettings):
     # Starts with the documented Open States gap (CO); expand as gaps are found.
     legiscan_states: str = "CO"
 
+    # LegiScan full-text SEARCH discovery (recall-first primary path).
+    # Comma-separated standing queries run nationally (state=ALL) each sweep;
+    # empty string = use the defaults in adapters/legiscan_search.py.
+    legiscan_search_queries: str = ""
+    # Drop search hits below this LegiScan relevance score (0-100).
+    legiscan_search_min_relevance: int = 50
+    # Per-run cap on getBill detail fetches; overflow is logged and picked up
+    # next run (its change_hash stays unseen).
+    legiscan_search_max_getbill: int = 300
+
     # Open States scope — "phase0" (OH + CO only) or "all" (all 50 states)
     openstates_scope: str = "all"
 
@@ -106,6 +116,16 @@ class Settings(BaseSettings):
     def legiscan_states_list(self) -> list[str]:
         """Lowercase two-letter states LegiScan handles directly (gap states)."""
         return [s.strip().lower() for s in self.legiscan_states.split(",") if s.strip()]
+
+    @property
+    def legiscan_search_queries_list(self) -> list[str]:
+        """Standing search queries; falls back to the adapter's default set."""
+        custom = [q.strip() for q in self.legiscan_search_queries.split(",") if q.strip()]
+        if custom:
+            return custom
+        from adapters.legiscan_search import DEFAULT_QUERIES
+
+        return list(DEFAULT_QUERIES)
 
 
 settings = Settings()
