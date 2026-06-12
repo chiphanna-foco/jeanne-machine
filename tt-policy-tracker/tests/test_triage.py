@@ -91,3 +91,17 @@ def test_triage_item_horizon_classification():
     assert recent["horizon"] == "recently_effective"
     far = triage_item({"action_needed": "urgent", "effective_date": "2027-06-01T00:00:00"}, today)
     assert far["horizon"] == "future"
+
+
+def test_effective_date_sort_soonest_first_undated_last():
+    from enrichment.triage import effective_date_sort_key
+
+    items = [
+        {"id": 1, "effective_date": None, "discovered_at": "2026-06-10T00:00:00"},
+        {"id": 2, "effective_date": "2026-09-01T00:00:00"},
+        {"id": 3, "effective_date": "2026-07-01T00:00:00"},
+        {"id": 4, "effective_date": None, "discovered_at": "2026-06-11T00:00:00"},
+    ]
+    ordered = sorted(items, key=effective_date_sort_key)
+    # Dated soonest-first, then undated newest-discovered-first.
+    assert [i["id"] for i in ordered] == [3, 2, 4, 1]

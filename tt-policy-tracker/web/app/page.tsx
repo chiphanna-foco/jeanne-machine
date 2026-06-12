@@ -68,6 +68,7 @@ export default function Dashboard() {
     topic?: string;
     impact?: string;
     state?: string;
+    sort?: string;
   }>({});
 
   useEffect(() => {
@@ -75,6 +76,7 @@ export default function Dashboard() {
     if (filters.topic) params.set("topic", filters.topic);
     if (filters.impact) params.set("impact", filters.impact);
     if (filters.state) params.set("state", filters.state);
+    if (filters.sort) params.set("sort", filters.sort);
     const activeTab = TABS.find((t) => t.key === tab);
     if (activeTab?.action_needed) params.set("action_needed", activeTab.action_needed);
     params.set("limit", "50");

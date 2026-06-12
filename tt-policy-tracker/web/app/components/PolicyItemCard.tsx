@@ -122,6 +122,26 @@ export function PolicyItemCard({ item }: { item: PolicyItem }) {
               {action.label}
             </span>
           )}
+          {item.effective_date && (
+            <span
+              title="Date this goes into law"
+              style={{
+                fontSize: 10,
+                fontWeight: 600,
+                color: "#7c3aed",
+                background: "#f5f3ff",
+                padding: "3px 8px",
+                borderRadius: 999,
+              }}
+            >
+              📅 In law:{" "}
+              {new Date(item.effective_date).toLocaleDateString(undefined, {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+              })}
+            </span>
+          )}
           {item.discovered_at && (
             <span style={{ fontSize: 11, color: "var(--color-text-subtle)", marginLeft: "auto" }}>
               {new Date(item.discovered_at).toLocaleDateString(undefined, {

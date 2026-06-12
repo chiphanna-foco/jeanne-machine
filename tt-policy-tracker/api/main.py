@@ -178,6 +178,7 @@ async def list_items(
     state: str | None = None,
     since: str | None = None,
     action_needed: str | None = None,
+    sort: str = Query(default="discovered"),
     dedupe: bool = Query(default=True),
     include_dismissed: bool = Query(default=False),
     limit: int = Query(default=50, le=200),
@@ -190,11 +191,21 @@ async def list_items(
     `inform,urgent` to fetch items the classifier flagged as passed laws
     or as needing action now.
 
+    `sort`: "discovered" (default, newest first) or "effective" — soonest
+    day-it-goes-into-law first; items with no effective date sort last.
+
     `dedupe` (default true): collapse multiple records of the same bill (e.g.
     a bill ingested via both LegiScan and Open States) to one, so the list
     isn't noisy with duplicates. Set false for the raw, un-collapsed list.
     """
-    query = select(PolicyItem).order_by(PolicyItem.discovered_at.desc())
+    if sort == "effective":
+        # Soonest-binding first; undated bills last (newest-discovered there).
+        query = select(PolicyItem).order_by(
+            PolicyItem.effective_date.asc().nulls_last(),
+            PolicyItem.discovered_at.desc(),
+        )
+    else:
+        query = select(PolicyItem).order_by(PolicyItem.discovered_at.desc())
 
     if topic:
         query = query.where(PolicyItem.topic_tags.contains([topic]))
@@ -221,13 +232,16 @@ async def list_items(
         # De-dup needs the whole filtered set, so fetch it (capped), collapse by
         # canonical bill, suppress 👎'd bills, then paginate for a correct total.
         from enrichment.feedback import annotate_and_suppress
-        from enrichment.triage import dedupe_items
+        from enrichment.triage import dedupe_items, effective_date_sort_key
 
         rows = (await session.execute(query.limit(_DEDUPE_SCAN_CAP))).scalars().all()
         all_items = [_policy_item_dict(it) for it in rows]
         deduped, _removed = dedupe_items(all_items)
         fb = await _latest_feedback(session)
         visible = annotate_and_suppress(deduped, fb, include_dismissed)
+        if sort == "effective":
+            # Re-sort after dedup so winner-swaps can't perturb the order.
+            visible.sort(key=effective_date_sort_key)
         return {
             "total": len(visible),
             "offset": offset,

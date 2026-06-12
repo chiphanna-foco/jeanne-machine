@@ -98,6 +98,26 @@ def dedupe_items(items: list[dict]) -> tuple[list[dict], int]:
     return list(best.values()) + passthrough, removed
 
 
+def effective_date_sort_key(item: dict) -> tuple:
+    """Sort key: soonest day-it-becomes-law first; undated items last.
+
+    Within undated items, fall back to newest-discovered first so the tail
+    is still useful. ISO date strings compare correctly as strings.
+    """
+    eff = item.get("effective_date")
+    if eff:
+        return (0, str(eff), "")
+    # Negate recency by inverting the discovered_at string sort via a tuple
+    # trick: undated items sort after dated ones, newest discovered first.
+    disc = str(item.get("discovered_at") or "")
+    return (1, "", _invert_str(disc))
+
+
+def _invert_str(s: str) -> str:
+    """Map a string so ascending sort yields descending original order."""
+    return "".join(chr(255 - ord(c)) if ord(c) < 255 else c for c in s)
+
+
 # action_needed → triage bucket. The classifier already encodes urgency here.
 _BUCKET = {"urgent": "act_now", "monitor": "monitor", "inform": "fyi", None: "fyi"}
 
