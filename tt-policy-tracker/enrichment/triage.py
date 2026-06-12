@@ -98,19 +98,30 @@ def dedupe_items(items: list[dict]) -> tuple[list[dict], int]:
     return list(best.values()) + passthrough, removed
 
 
-def effective_date_sort_key(item: dict) -> tuple:
-    """Sort key: soonest day-it-becomes-law first; undated items last.
+def make_effective_sort_key(today: datetime):
+    """Key factory for "goes into law soonest" ordering, FUTURE-first.
 
-    Within undated items, fall back to newest-discovered first so the tail
-    is still useful. ISO date strings compare correctly as strings.
+    What the legal team means by this sort: "what's about to become binding?"
+      group 0 — effective today or later, soonest first (the upcoming wave)
+      group 1 — already effective, most recent first (recently became law)
+      group 2 — no effective date, newest discovered first (watchlist tail)
+
+    A plain ascending date sort gets this wrong — it surfaces decade-old laws
+    first (a 2016 federal act outranked next month's state law).
     """
-    eff = item.get("effective_date")
-    if eff:
-        return (0, str(eff), "")
-    # Negate recency by inverting the discovered_at string sort via a tuple
-    # trick: undated items sort after dated ones, newest discovered first.
-    disc = str(item.get("discovered_at") or "")
-    return (1, "", _invert_str(disc))
+    today_s = today.strftime("%Y-%m-%d")
+
+    def key(item: dict) -> tuple:
+        eff = item.get("effective_date")
+        if eff:
+            e = str(eff)[:10]
+            if e >= today_s:
+                return (0, e, "")
+            return (1, _invert_str(e), "")
+        disc = str(item.get("discovered_at") or "")
+        return (2, "", _invert_str(disc))
+
+    return key
 
 
 def _invert_str(s: str) -> str:
