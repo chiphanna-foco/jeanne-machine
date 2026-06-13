@@ -52,7 +52,7 @@ const ACTIONS: Action[] = [
   {
     key: "weekly-full",
     label: "Run Full Weekly Pipeline",
-    description: "Ingest → enrich → refresh laws → Slack. Matches Friday cron.",
+    description: "Ingest → enrich → refresh laws → Slack digest (budget-capped). Matches Friday cron.",
     path: "/admin/cron-weekly-full",
     confirmText: "This runs the complete weekly pipeline (ingest + enrich + laws + Slack). Continue?",
     icon: "⚡",
@@ -60,9 +60,17 @@ const ACTIONS: Action[] = [
   {
     key: "slack",
     label: "Send Slack Digest",
-    description: "Send a weekly digest to the configured Slack channel.",
-    path: "/admin/send-slack-digest?frequency=weekly&days_back=7",
+    description: "Send the compact digest now (covers everything since the last post). Capped at 2 posts/week — if the budget's spent, it's skipped.",
+    path: "/admin/send-slack-digest?frequency=weekly",
     icon: "💬",
+  },
+  {
+    key: "slack-budget",
+    label: "View Slack Budget",
+    description: "This week's digest posts vs. the 2/week cap, and whether real-time per-sweep alerts are on.",
+    path: "/admin/slack-budget",
+    icon: "🧮",
+    view: true,
   },
   {
     key: "drafts",

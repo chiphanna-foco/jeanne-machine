@@ -1,0 +1,30 @@
+# Fires /admin/cron-weekly-slack twice a week — Monday and Thursday at 16:00
+# UTC (10am MDT / 9am MST) — the only two automated Slack digests we send.
+# The digest covers everything discovered since the last post, and the backend
+# enforces a hard weekly post budget (settings.slack_weekly_post_budget, default
+# 2), so even if this overlaps the Friday weekly-full pipeline it can't exceed
+# the cap. Requires repo secrets API_BASE_URL and ADMIN_TOKEN.
+name: Twice-weekly Slack digest
+
+on:
+  schedule:
+    - cron: "0 16 * * 1"
+    - cron: "0 16 * * 4"
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit /admin/cron-weekly-slack
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${API_BASE_URL:-}" ] || [ -z "${ADMIN_TOKEN:-}" ]; then
+            echo "Missing API_BASE_URL or ADMIN_TOKEN repo secret" >&2
+            exit 1
+          fi
+          curl -sS --fail-with-body --max-time 30 \
+            "${API_BASE_URL%/}/admin/cron-weekly-slack?token=${ADMIN_TOKEN}"

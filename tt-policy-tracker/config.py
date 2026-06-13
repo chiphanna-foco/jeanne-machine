@@ -31,6 +31,18 @@ class Settings(BaseSettings):
     # line and lives in the dashboard. Keeps a backfill from blasting 50 states
     # at once at the legal team.
     slack_max_alert_items: int = 8
+    # Hard cap on automated DIGEST posts per ISO week, enforced durably via the
+    # slack_post ledger (digest.slack.send_digest_within_budget). The product
+    # rule (TurboTenant, 2026-06-13): at most 2 Slack posts a week — anything
+    # beyond is noise. Every cron path and manual digest trigger shares this
+    # budget, so they can't collectively exceed it.
+    slack_weekly_post_budget: int = 2
+    # Real-time per-sweep "act now" Slack pings. OFF by default: the 2-hourly
+    # search sweep and daily pipeline would otherwise ping on every newly-
+    # discovered enacted law (the national-search backfill makes that ~13/day).
+    # Items are still ingested/enriched/tracked; the twice-weekly digest carries
+    # them. Flip to true only if same-day urgent pings are wanted again.
+    slack_realtime_alerts: bool = False
 
     # CourtListener — free API token from courtlistener.com
     courtlistener_api_token: str = ""

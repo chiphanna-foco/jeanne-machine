@@ -571,7 +571,17 @@ async def _push_act_now_alerts(new_item_ids: list[int], results: dict) -> None:
     everything else is tracked silently in the dashboard watchlist. The
     per-run cap keeps a backfill from blasting 50 states at the legal team —
     overflow is one footer line and drains across subsequent runs.
+
+    Disabled by default (TurboTenant, 2026-06-13: max ~2 Slack posts/week).
+    The 2-hourly search sweep and daily pipeline would otherwise ping on every
+    newly-discovered enacted law. When off, items are still ingested, enriched,
+    and tracked — the twice-weekly digest carries them. Flip
+    ``settings.slack_realtime_alerts`` to re-enable same-day urgent pings.
     """
+    if not settings.slack_realtime_alerts:
+        results["slack_sent"] = False
+        results["slack_realtime_disabled"] = True
+        return
     try:
         from digest.slack import build_alert_blocks, send_to_slack
         from enrichment.alerting import alert_sort_key, should_alert
@@ -2180,6 +2190,47 @@ async def cron_daily_slack(token: str | None = Query(default=None)):
     return {"status": "started", "message": "Daily Slack digest task started."}
 
 
+@app.get("/admin/slack-budget")
+async def slack_budget(token: str | None = Query(default=None)):
+    """Show this week's Slack digest budget usage and the recent post history.
+
+    Read-only. Confirms the 'max N posts/week' cap at a glance: how many
+    digests have gone out this ISO week, the cap, and whether real-time
+    per-sweep alerts are on.
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    from digest.slack import digest_posts_this_week
+    from storage.models import SlackPost
+
+    async with async_session() as session:
+        used = await digest_posts_this_week(session)
+        recent = (
+            await session.execute(
+                select(SlackPost).order_by(SlackPost.posted_at.desc()).limit(10)
+            )
+        ).scalars().all()
+
+    budget = settings.slack_weekly_post_budget
+    return {
+        "weekly_post_budget": budget,
+        "posts_this_week": used,
+        "remaining_this_week": max(budget - used, 0),
+        "realtime_alerts_enabled": settings.slack_realtime_alerts,
+        "recent_posts": [
+            {
+                "kind": p.kind,
+                "item_count": p.item_count,
+                "iso_year": p.iso_year,
+                "iso_week": p.iso_week,
+                "posted_at": p.posted_at.isoformat() if p.posted_at else None,
+            }
+            for p in recent
+        ],
+    }
+
+
 @app.get("/admin/hub-alerts")
 async def hub_alerts(
     days_back: int = Query(default=1, ge=1, le=90),
@@ -2319,27 +2370,55 @@ async def hub_alerts(
 
 
 async def _run_slack_digest_task(frequency: str, days_back: int):
-    """Background task: build and send a digest to Slack."""
+    """Background task: build and send a digest to Slack, budget-gated.
+
+    Lookback (when days_back is 0): cover everything since the last digest
+    post, so the twice-weekly cadence never doubles-up or drops items. Falls
+    back to 7 days if we've never posted. The send goes through
+    send_digest_within_budget, so the weekly post cap holds no matter how many
+    crons fire.
+    """
     global _pipeline_status
     _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
 
     results = {"sent": False, "item_count": 0, "errors": []}
 
     try:
-        from digest.slack import build_slack_digest, send_to_slack
+        from digest.slack import build_slack_digest, send_digest_within_budget
+        from storage.models import SlackPost
 
         async with async_session() as session:
-            lookback = timedelta(days=days_back) if days_back > 0 else None
-            blocks, item_ids = await build_slack_digest(session, subscription=None, lookback=lookback)
+            if days_back > 0:
+                lookback = timedelta(days=days_back)
+            else:
+                last = (
+                    await session.execute(
+                        select(SlackPost.posted_at)
+                        .where(SlackPost.kind == "digest")
+                        .order_by(SlackPost.posted_at.desc())
+                        .limit(1)
+                    )
+                ).scalar()
+                if last:
+                    lookback = datetime.utcnow() - last.replace(tzinfo=None)
+                else:
+                    lookback = timedelta(days=7)
 
+            blocks, item_ids = await build_slack_digest(session, subscription=None, lookback=lookback)
             results["item_count"] = len(item_ids)
 
             fallback_text = f"TT Policy Tracker {frequency} digest — {len(item_ids)} items"
-            ok = await send_to_slack(settings.slack_webhook_url, blocks, fallback_text=fallback_text)
+            ok, reason = await send_digest_within_budget(
+                session,
+                settings.slack_webhook_url,
+                blocks,
+                fallback_text=fallback_text,
+                item_count=len(item_ids),
+            )
             results["sent"] = ok
-
-            if not ok:
-                results["errors"].append("Slack webhook returned non-200 or non-'ok'")
+            results["reason"] = reason
+            if not ok and "budget" not in reason:
+                results["errors"].append(reason)
 
     except Exception as e:
         results["errors"].append(f"slack digest error: {type(e).__name__}: {str(e)[:300]}")
@@ -2844,22 +2923,26 @@ async def _run_weekly_full_task():
         except Exception as e:
             results["errors"].append(f"law synth stage: {str(e)[:300]}")
 
-        # Step 4: Slack digest
+        # Step 4: Slack digest — budget-gated, so this Friday run and the
+        # twice-weekly digest cron share the weekly post cap (no double-posting).
         if settings.slack_webhook_url:
             try:
-                from digest.slack import build_slack_digest, send_to_slack
+                from digest.slack import build_slack_digest, send_digest_within_budget
 
                 async with async_session() as session:
                     blocks, item_ids = await build_slack_digest(
                         session, subscription=None, lookback=timedelta(days=7)
                     )
                     results["slack_item_count"] = len(item_ids)
-                    ok = await send_to_slack(
+                    ok, reason = await send_digest_within_budget(
+                        session,
                         settings.slack_webhook_url,
                         blocks,
                         fallback_text=f"TT Policy Tracker weekly digest ({len(item_ids)} items)",
+                        item_count=len(item_ids),
                     )
                     results["slack_sent"] = ok
+                    results["slack_reason"] = reason
             except Exception as e:
                 results["errors"].append(f"slack stage: {str(e)[:300]}")
 
