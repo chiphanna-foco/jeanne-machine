@@ -10,11 +10,11 @@ import logging
 from datetime import datetime, timedelta
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
-from storage.models import ItemFeedback, PolicyItem, Subscription
+from storage.models import ItemFeedback, PolicyItem, SlackPost, Subscription
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +245,63 @@ async def send_to_slack(webhook_url: str, blocks: list[dict], fallback_text: str
             return True
         logger.error(f"Slack webhook failed ({resp.status_code}): {resp.text[:300]}")
         return False
+
+
+async def digest_posts_this_week(session: AsyncSession, now: datetime | None = None) -> int:
+    """How many digest posts have already gone out in the current ISO week."""
+    now = now or datetime.utcnow()
+    iso_year, iso_week, _ = now.isocalendar()
+    count = (
+        await session.execute(
+            select(func.count(SlackPost.id)).where(
+                SlackPost.kind == "digest",
+                SlackPost.iso_year == iso_year,
+                SlackPost.iso_week == iso_week,
+            )
+        )
+    ).scalar()
+    return count or 0
+
+
+async def send_digest_within_budget(
+    session: AsyncSession,
+    webhook_url: str,
+    blocks: list[dict],
+    fallback_text: str,
+    budget: int | None = None,
+    item_count: int = 0,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    """Post a digest to Slack only if this ISO week's budget isn't spent.
+
+    The single chokepoint every automated digest send goes through, so no
+    combination of crons (twice-weekly digest, weekly-full pipeline, manual
+    trigger) can collectively exceed ``settings.slack_weekly_post_budget``.
+    Records a slack_post row on a successful send. Returns (sent, reason).
+    """
+    if budget is None:
+        budget = settings.slack_weekly_post_budget
+    now = now or datetime.utcnow()
+    already = await digest_posts_this_week(session, now)
+    if already >= budget:
+        reason = f"weekly digest budget spent ({already}/{budget}) — skipped to keep Slack quiet"
+        logger.info(reason)
+        return False, reason
+
+    ok = await send_to_slack(webhook_url, blocks, fallback_text=fallback_text)
+    if ok:
+        iso_year, iso_week, _ = now.isocalendar()
+        session.add(
+            SlackPost(
+                kind="digest",
+                item_count=item_count,
+                iso_year=iso_year,
+                iso_week=iso_week,
+            )
+        )
+        await session.commit()
+        return True, f"sent ({already + 1}/{budget} this week)"
+    return False, "Slack webhook send failed"
 
 
 def _item_dict(item: PolicyItem) -> dict:

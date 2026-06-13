@@ -269,3 +269,29 @@ class ItemFeedback(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
+
+class SlackPost(Base):
+    """Ledger of automated digest Slack posts — enforces the weekly post budget.
+
+    The product rule (TurboTenant, 2026-06-13): at most N digest posts per ISO
+    week (``settings.slack_weekly_post_budget``, default 2). One row per post.
+    Durable so the cap survives container restarts and holds across every path
+    that posts (twice-weekly digest cron, weekly-full pipeline, manual trigger).
+
+    ``iso_year``/``iso_week`` are stored denormalized so "how many this week"
+    is a trivial indexed count with no date math or timezone edge cases.
+    """
+
+    __tablename__ = "slack_post"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # What kind of post this was. Only "digest" is budget-governed today; the
+    # column lets us add other categories (e.g. ops acks) without a migration.
+    kind: Mapped[str] = mapped_column(Text, nullable=False, default="digest")
+    item_count: Mapped[int] = mapped_column(Integer, default=0)
+    iso_year: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    iso_week: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    posted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
