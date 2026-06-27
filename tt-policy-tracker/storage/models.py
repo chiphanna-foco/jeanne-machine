@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
@@ -293,5 +294,35 @@ class SlackPost(Base):
     iso_week: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     posted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ApiUsage(Base):
+    """Monthly query counter for metered upstream APIs — a durable budget guard.
+
+    LegiScan's free key allows 30,000 queries/calendar-month and SUSPENDS the
+    account on overage (the email even forbids extra keys to bypass it). We
+    self-throttle well under that ceiling: one row per (provider, year, month)
+    holds the running query count, bumped after every sweep, and the LegiScan
+    adapters refuse to spend past ``settings.legiscan_monthly_budget``.
+
+    ``year``/``month`` are stored denormalized (UTC) so "this month's spend" is
+    a trivial indexed lookup with no date math — same pattern as SlackPost's
+    iso_week. Counts every LegiScan op (getMasterList/getBill/getSearchRaw)
+    across both adapters and every run path.
+    """
+
+    __tablename__ = "api_usage"
+    __table_args__ = (
+        UniqueConstraint("provider", "year", "month", name="uq_api_usage_period"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    year: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    month: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    query_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 

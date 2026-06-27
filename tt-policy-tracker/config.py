@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     # Per-run cap on getBill detail fetches; overflow is logged and picked up
     # next run (its change_hash stays unseen).
     legiscan_search_max_getbill: int = 300
+    # Self-imposed monthly query ceiling (defensive backstop). LegiScan's free
+    # key allows 30,000/calendar-month and SUSPENDS the account on overage (and
+    # forbids extra keys), so we stop well under it. Counts every LegiScan op
+    # across both adapters in the api_usage table; resets each calendar month.
+    legiscan_monthly_budget: int = 27000
 
     # Open States scope — "phase0" (OH + CO only) or "all" (all 50 states)
     openstates_scope: str = "all"

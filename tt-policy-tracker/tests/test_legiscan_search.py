@@ -65,3 +65,68 @@ def test_normalize_detail_appends_matched_queries_context():
 
 def test_source_name_distinct_from_masterlist_adapter():
     assert _adapter().source_name == "legiscan_search"
+
+
+def test_budget_remaining_propagates_to_base_adapter():
+    # The search adapter must forward the monthly budget into the shared
+    # _get_json guard (it lives on the base LegiScanAdapter).
+    a = _adapter(budget_remaining=5)
+    assert a.budget_remaining == 5
+    assert a.queries_used == 0
+
+
+def test_get_json_refuses_to_spend_past_budget():
+    # With budget already consumed, _get_json must raise BEFORE any network
+    # call so we never trip LegiScan's hard monthly limit.
+    import asyncio
+
+    from adapters.legiscan import LegiScanBudgetExceeded
+
+    a = _adapter(budget_remaining=1)
+    a.queries_used = 1  # budget exhausted for this window
+
+    async def _go():
+        await a._get_json({"op": "getSearchRaw", "state": "ALL", "query": "x"})
+
+    try:
+        asyncio.run(_go())
+        assert False, "expected LegiScanBudgetExceeded"
+    except LegiScanBudgetExceeded:
+        pass
+
+
+def test_api_error_is_not_retried():
+    # A non-OK LegiScan envelope (quota/throttle) is a LegiScanApiError, which
+    # must fail fast — retrying just burns more quota on the same failure.
+    import asyncio
+
+    from adapters.legiscan import LegiScanApiError
+
+    class _FakeResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"status": "ERROR", "alert": {"message": "exceeded query count"}}
+
+    class _FakeClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def get(self, *a, **kw):
+            self.calls += 1
+            return _FakeResp()
+
+    a = _adapter()
+    a.client = _FakeClient()
+
+    async def _go():
+        await a._get_json({"op": "getBill", "id": 1})
+
+    try:
+        asyncio.run(_go())
+        assert False, "expected LegiScanApiError"
+    except LegiScanApiError:
+        pass
+    # Exactly one call — no retry loop on an application-level error.
+    assert a.client.calls == 1

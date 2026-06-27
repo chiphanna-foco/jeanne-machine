@@ -1,13 +1,17 @@
-# Frequent LegiScan full-text search sweep — the recall-first discovery loop.
-# Every 2 hours: LegiScan's search cache refreshes hourly, so this is as often
-# as is useful without spending queries on cached data. The endpoint skips
+# Daily LegiScan full-text search sweep — the recall-first discovery loop.
+# Once a day: bills rarely change intra-day and LegiScan's free key allows only
+# 30,000 queries/month (overage SUSPENDS the account, and extra keys are
+# forbidden). At 16 standing queries + up to 300 getBill per run, an every-2h
+# cadence (12x/day) blew the monthly budget; daily keeps the worst case ~10x
+# under it while still surfacing new bills within a day. The endpoint skips
 # itself if a pipeline run is already in progress, so overlap can't pile up.
 # Requires repo secrets API_BASE_URL and ADMIN_TOKEN.
 name: Search sweep
 
 on:
   schedule:
-    - cron: "15 */2 * * *"
+    # 06:15 UTC — well clear of the 10:00 UTC daily pipeline.
+    - cron: "15 6 * * *"
   workflow_dispatch:
 
 jobs:

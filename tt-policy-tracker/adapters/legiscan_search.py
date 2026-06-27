@@ -73,9 +73,11 @@ class LegiScanSearchAdapter(LegiScanAdapter):
         seen_change_hashes: dict[int, str] | None = None,
         min_relevance: int | None = None,
         max_getbill: int | None = None,
+        budget_remaining: int | None = None,
     ):
         super().__init__(client=client, states=[], api_key=api_key,
-                         seen_change_hashes=seen_change_hashes)
+                         seen_change_hashes=seen_change_hashes,
+                         budget_remaining=budget_remaining)
         self.queries = queries if queries is not None else settings.legiscan_search_queries_list
         self.min_relevance = (
             min_relevance if min_relevance is not None
