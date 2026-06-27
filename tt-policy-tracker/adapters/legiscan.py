@@ -73,6 +73,23 @@ BASE_URL = "https://api.legiscan.com/"
 LEGISCAN_MIN_INTERVAL = 0.3
 
 
+class LegiScanApiError(Exception):
+    """A non-OK LegiScan envelope (quota exceeded, throttle, bad key, …).
+
+    Distinct from a transient network fault so ``_get_json`` can fail fast:
+    retrying an application-level error just burns more quota against the same
+    failure (and once quota is exhausted, every retry is another wasted call).
+    """
+
+
+class LegiScanBudgetExceeded(Exception):
+    """Raised before a call when we've hit our self-imposed monthly ceiling.
+
+    Stops spend at ``settings.legiscan_monthly_budget`` so we never reach
+    LegiScan's hard 30,000/month limit (which suspends the account).
+    """
+
+
 def colorado_bill_id(number: str, year_start: int | None) -> str:
     """Render a LegiScan bill number in Colorado's official ``HB26-1196`` form.
 
@@ -106,6 +123,7 @@ class LegiScanAdapter(BaseAdapter):
         states: list[str] | None = None,
         api_key: str | None = None,
         seen_change_hashes: dict[int, str] | None = None,
+        budget_remaining: int | None = None,
     ):
         super().__init__(client or httpx.AsyncClient(timeout=60.0))
         # LegiScan uses uppercase two-letter abbreviations (CO, WA, ...).
@@ -115,6 +133,12 @@ class LegiScanAdapter(BaseAdapter):
         # current change_hash matches is unchanged → skip the getBill spend.
         # The pipeline populates this from prior raw docs (see api/main.py).
         self.seen_change_hashes = seen_change_hashes or {}
+        # Queries left this calendar month before our self-imposed ceiling
+        # (settings.legiscan_monthly_budget − spend so far). None disables the
+        # guard. ``queries_used`` counts this run's spend so the caller can
+        # persist it back to the api_usage counter.
+        self.budget_remaining = budget_remaining
+        self.queries_used = 0
         # Mirror openstates_by_state / wa_leg so the pipeline surfaces a
         # per-state breakdown under the "legiscan_by_state" key.
         self.last_run_stats: dict[str, dict] = {}
@@ -246,7 +270,23 @@ class LegiScanAdapter(BaseAdapter):
         error (and surfaces quota/throttle messages) instead of silently
         treating an error body as an empty session.
         """
+        # Self-imposed monthly budget guard: refuse to spend past our ceiling
+        # so we never trip LegiScan's hard 30,000/month limit (which suspends
+        # the account). Checked BEFORE the call so no quota is burned.
+        if (
+            self.budget_remaining is not None
+            and self.queries_used >= self.budget_remaining
+        ):
+            raise LegiScanBudgetExceeded(
+                f"LegiScan monthly budget reached "
+                f"({self.queries_used}/{self.budget_remaining} this window); "
+                f"deferring {params.get('op')} to next month/run"
+            )
+
         params = {"key": self.api_key, **params}
+        # Count one query per logical op (not per retry) — matches how LegiScan
+        # meters and lets the caller persist this run's spend.
+        self.queries_used += 1
         last_err: Exception | None = None
         for attempt in range(3):
             try:
@@ -263,13 +303,18 @@ class LegiScanAdapter(BaseAdapter):
                 data = resp.json()
                 status = (data.get("status") or "").upper()
                 if status != "OK":
-                    # LegiScan reports errors as {"status":"ERROR","alert":{"message":...}}
+                    # LegiScan reports errors as {"status":"ERROR","alert":{"message":...}}.
+                    # This is an application-level failure (quota/throttle/bad
+                    # key), NOT a transient network fault — fail fast instead of
+                    # retrying, which would only burn more quota on the same error.
                     alert = data.get("alert", {}) or {}
-                    raise Exception(
+                    raise LegiScanApiError(
                         f"LegiScan status={status or 'UNKNOWN'}: "
                         f"{alert.get('message', 'no message')}"
                     )
                 return data
+            except LegiScanApiError:
+                raise
             except Exception as e:
                 last_err = e
                 await asyncio.sleep(2 ** attempt)
