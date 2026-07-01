@@ -1,0 +1,38 @@
+name: fetch-url
+
+# Throwaway helper: fetch an arbitrary public URL from a GitHub runner
+# (which has open outbound HTTP, unlike the Claude sandbox) and print it.
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL to fetch'
+        required: true
+        type: string
+      pdf:
+        description: 'Set to 1 to extract text from a PDF'
+        required: false
+        default: '0'
+        type: string
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch URL
+        env:
+          TARGET_URL: ${{ inputs.url }}
+          IS_PDF: ${{ inputs.pdf }}
+        run: |
+          set -euo pipefail
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          echo "GET ${TARGET_URL}"
+          echo "-------------------- BEGIN RESPONSE --------------------"
+          if [ "${IS_PDF}" = "1" ]; then
+            sudo apt-get update -qq >/dev/null 2>&1 && sudo apt-get install -y -qq poppler-utils >/dev/null 2>&1 || true
+            curl -sSL -A "$UA" "$TARGET_URL" -o file.pdf -w "HTTP_STATUS=%{http_code}\n"
+            pdftotext -layout file.pdf - || echo "(pdftotext failed)"
+          else
+            curl -sSL -A "$UA" "$TARGET_URL" -w "\nHTTP_STATUS=%{http_code}\n" | python3 -c "import sys,html,re; t=sys.stdin.read(); t=re.sub(r'(?is)<script.*?</script>','',t); t=re.sub(r'(?is)<style.*?</style>','',t); t=re.sub(r'(?s)<[^>]+>',' ',t); t=html.unescape(t); t=re.sub(r'[ \t]+',' ',t); t=re.sub(r'\n\s*\n+','\n',t); print(t)"
+          fi
+          echo "-------------------- END RESPONSE --------------------"
