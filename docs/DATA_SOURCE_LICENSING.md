@@ -8,19 +8,35 @@ to a **public, for-profit** website.
 > Two items (LegiScan, Legistar) should get written sign-off before a public
 > launch — see [Action items](#action-items).
 
-## How the tool uses the data (this drives the analysis)
+## Architecture (this drives the analysis)
 
-- The public site serves visitors from **our own database**, showing
-  **AI-generated summaries + a link back to the source** — it does not
-  live-proxy provider APIs per page view, and does not reproduce full statutory
-  text on the page. API keys stay **server-side**; provider calls happen only in
-  background ingestion. This keeps us under every provider's rate cap and out of
-  most redistribution concerns.
-- The backend stores source **metadata and text** (`raw_document.raw_text`,
-  `policy_item.full_text`). Caching/local storage is permitted by every source
-  below (several explicitly encourage it).
-- Going public removes the password gate, so terms that bind **public
-  redistribution** now apply where they didn't for an internal tool.
+Going public does **not** change how we call any provider. It's a two-tier setup:
+
+- **Jeanne Machine (internal backend)** does all provider API calls — ingestion,
+  enrichment, storing raw text — exactly as it does today. API keys stay
+  **server-side**; provider calls happen only in background ingestion. Public
+  users **never** trigger a provider call, so **provider rate limits are purely
+  an internal concern and do not scale with public traffic.** The backend stores
+  source **metadata and text** (`raw_document.raw_text`, `policy_item.full_text`);
+  caching/local storage is permitted by every source below (several explicitly
+  encourage it).
+- **The public site** is a **downstream published view** that Jeanne Machine
+  pushes to. It shows **AI-generated summaries + factual metadata + a link back
+  to the source** — it does not live-proxy provider APIs and should not
+  reproduce raw provider full text or CourtListener's annotations.
+
+What changes when we go public: removing the password gate means terms that bind
+**public redistribution and display** now apply where they didn't for an
+internal tool. That's about the *published derived data*, not the API calls — so
+the attribution requirements (LegiScan CC BY, CourtListener BY) must travel to
+the public site, and the two sign-off items below still stand. The rate-limit
+question, by contrast, is fully resolved by this architecture.
+
+**Publish-boundary rule:** push AI summaries + links + factual metadata (bill
+number, title, status, dates, topics) to the public site — **not** raw provider
+full text or FLP annotations. Attribution/credit travels with the published
+data. Enforcing this at the push step keeps CourtListener's "No-Derivatives"
+term and any raw-text redistribution concern on the right side of the line.
 
 ## Summary table
 
@@ -158,10 +174,12 @@ to a **public, for-profit** website.
 2. **Show a data-source attribution footer** — required for LegiScan (CC BY) and
    CourtListener (BY), appreciated everywhere else. Implemented in
    `web/app/components/SiteFooter.tsx`.
-3. **Keep API keys server-side and serve visitors from our DB.** Already the
-   design; it is what keeps us within every rate limit.
-4. **Do not republish CourtListener's proprietary annotations verbatim** — work
-   from the public-domain opinion text.
+3. **Keep provider API calls on the internal backend; the public site is a
+   published view.** Keys stay server-side and public users never trigger a
+   provider call — this is what makes provider rate limits independent of public
+   traffic.
+4. **Enforce the publish boundary:** push AI summaries + links + factual metadata
+   to the public site, not raw provider full text or CourtListener annotations.
 5. **State that summaries are AI-generated and not legal advice**, and that no
    affiliation with or endorsement by any source is implied.
 
@@ -172,6 +190,9 @@ to a **public, for-profit** website.
 - [ ] **Legal:** confirm Legistar/Granicus reuse rights (or scope to
       jurisdictions whose public-records status clearly permits it).
 - [ ] **Eng:** ship the data-source attribution footer (done alongside this doc).
+- [ ] **Eng:** enforce the publish boundary at the push step — only AI summaries
+      + links + factual metadata reach the public site (no raw provider text /
+      FLP annotations).
 - [ ] **Eng:** if CourtListener is used at public scale, obtain a membership/
       commercial agreement + API token, and ensure summaries derive from
       opinion text, not FLP annotations.
