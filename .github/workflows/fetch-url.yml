@@ -31,7 +31,11 @@ jobs:
           if [ "${IS_PDF}" = "1" ]; then
             sudo apt-get update -qq >/dev/null 2>&1 && sudo apt-get install -y -qq poppler-utils >/dev/null 2>&1 || true
             curl -sSL -A "$UA" "$TARGET_URL" -o file.pdf -w "HTTP_STATUS=%{http_code}\n"
-            pdftotext -layout file.pdf - || echo "(pdftotext failed)"
+            pdftotext -layout file.pdf out.txt || echo "(pdftotext failed)"
+            echo "===== FIRST 200 LINES ====="
+            sed -n '1,200p' out.txt
+            echo "===== LICENSE / FAIR USE / TERMS GREP (with context) ====="
+            grep -n -i -A6 -B2 -E 'licens|fair use|terms of service|attribut|powered by|redistribut|resell|reseller|cach|copyright|commercial|monthly|per month|per day|quer(y|ies)|30,?000|limit' out.txt || echo "(no keyword matches)"
           else
             curl -sSL -A "$UA" "$TARGET_URL" -w "\nHTTP_STATUS=%{http_code}\n" | python3 -c "import sys,html,re; t=sys.stdin.read(); t=re.sub(r'(?is)<script.*?</script>','',t); t=re.sub(r'(?is)<style.*?</style>','',t); t=re.sub(r'(?s)<[^>]+>',' ',t); t=html.unescape(t); t=re.sub(r'[ \t]+',' ',t); t=re.sub(r'\n\s*\n+','\n',t); print(t)"
           fi
