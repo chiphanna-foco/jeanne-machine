@@ -1,0 +1,53 @@
+name: 'Notify Chip on failure'
+description: >
+  DMs Chip on Slack when the calling workflow's run fails. Add as the last
+  step of a job with `if: failure()` so a dead cron doesn't die silently.
+
+inputs:
+  slack-bot-token:
+    description: >
+      Slack bot token with chat:write scope, e.g. secrets.SLACK_BOT_TOKEN.
+      If empty, this step logs a warning and exits 0 (it never fails the
+      job on top of the original failure).
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Post Slack DM to Chip
+      shell: bash
+      env:
+        SLACK_BOT_TOKEN: ${{ inputs.slack-bot-token }}
+        WORKFLOW_NAME: ${{ github.workflow }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        # Chip's Slack user ID — DM, not a channel post.
+        SLACK_USER_ID: U0645F5KJCQ
+      run: |
+        set -uo pipefail
+
+        if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
+          echo "::warning::SLACK_BOT_TOKEN repo secret is not set — cannot DM Chip about this failure. Add it under Settings > Secrets and variables > Actions (chat:write scope, bot in the workspace)."
+          exit 0
+        fi
+
+        text="🔴 jeanne-machine ${WORKFLOW_NAME} failed — ${RUN_URL}"
+
+        payload=$(jq -n --arg channel "$SLACK_USER_ID" --arg text "$text" \
+          '{channel: $channel, text: $text}')
+
+        resp=$(curl -sS -w '\n%{http_code}' https://slack.com/api/chat.postMessage \
+          -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+          -H "Content-Type: application/json; charset=utf-8" \
+          -d "$payload")
+
+        code="${resp##*$'\n'}"
+        body="${resp%$'\n'*}"
+        echo "Slack chat.postMessage -> HTTP ${code}"
+
+        ok=$(echo "$body" | jq -r '.ok // false' 2>/dev/null || echo false)
+        if [ "$ok" != "true" ]; then
+          # Don't print the full body (could echo the token back in rare
+          # error payloads) — just the error code Slack returns.
+          err=$(echo "$body" | jq -r '.error // "unknown"' 2>/dev/null || echo "unknown")
+          echo "::warning::Slack DM to Chip failed: ${err}"
+        fi

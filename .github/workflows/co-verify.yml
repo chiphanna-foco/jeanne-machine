@@ -77,3 +77,13 @@ jobs:
             echo "Most likely an OpenStates source-coverage gap for the 2026 session (see probe above)."
             exit 1
           fi
+
+      - name: Check out repo for failure notification
+        if: failure()
+        uses: actions/checkout@v4
+
+      - name: Notify Chip on failure
+        if: failure()
+        uses: ./.github/actions/notify-failure
+        with:
+          slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
