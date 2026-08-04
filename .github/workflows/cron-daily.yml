@@ -23,3 +23,13 @@ jobs:
           fi
           curl -sS --fail-with-body --max-time 30 \
             "${API_BASE_URL%/}/admin/cron-daily?token=${ADMIN_TOKEN}"
+
+      - name: Check out repo for failure notification
+        if: failure()
+        uses: actions/checkout@v4
+
+      - name: Notify Chip on failure
+        if: failure()
+        uses: ./.github/actions/notify-failure
+        with:
+          slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
