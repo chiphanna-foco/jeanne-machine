@@ -156,16 +156,29 @@ def collect_failed_runs(repo: str, token: str, self_run_id: str) -> list[dict]:
     return failures
 
 
+def last_success(repo: str, workflow_file: str, token: str) -> dict | None:
+    """Newest successful run of a workflow, found by reading recent runs and checking
+    `conclusion` ourselves.
+
+    Deliberately NOT `?status=success`. That filter is unreliable: on 2026-08-10 the API
+    returned Aug 9 / 8 / 7 for cron-search.yml and silently omitted run 31368410789 from Aug 10,
+    which is `status: completed`, `conclusion: success`, same `workflow_id`, and appears first
+    when the same endpoint is called with no filter. The watchdog believed the last success was
+    34h old and sent Chip a false "cron looks missed" alert. A watchdog that cries wolf gets
+    muted, so it reads the raw list and decides for itself.
+    """
+    data = gh_get(f"/repos/{repo}/actions/workflows/{workflow_file}/runs", token, per_page=30)
+    for run in data.get("workflow_runs", []):
+        if run.get("status") == "completed" and run.get("conclusion") == "success":
+            return run
+    return None
+
+
 def collect_stale_crons(repo: str, token: str) -> list[dict]:
     stale = []
     for workflow_file, max_hours in sorted(STALENESS_HOURS.items()):
         try:
-            data = gh_get(
-                f"/repos/{repo}/actions/workflows/{workflow_file}/runs",
-                token,
-                status="success",
-                per_page=1,
-            )
+            last = last_success(repo, workflow_file, token)
         except urllib.error.HTTPError as exc:
             # A workflow that has been renamed or deleted should be noticed,
             # not skipped -- silence here would hide the cron disappearing.
@@ -178,18 +191,16 @@ def collect_stale_crons(repo: str, token: str) -> list[dict]:
             )
             continue
 
-        runs = data.get("workflow_runs", [])
-        if not runs:
+        if last is None:
             stale.append(
                 {
                     "key": f"stale:{workflow_file}:{now():%Y-%m-%d}",
                     "workflow": workflow_file,
-                    "detail": "has never completed successfully",
+                    "detail": "no successful run in its last 30 runs",
                 }
             )
             continue
 
-        last = runs[0]
         gap = now() - parse_ts(last["created_at"])
         if gap > timedelta(hours=max_hours):
             stale.append(
