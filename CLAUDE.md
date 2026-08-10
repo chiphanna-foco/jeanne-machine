@@ -41,6 +41,18 @@ gh run view <run-id> --log | sed -n '/response body/,/----/p'  # read the respon
 
 **Caveats:** ~30s round-trip per call (runner spin-up) — fine for one-shot admin actions, not for tight polling. Background-task endpoints (`drain-enrich`, `run-pipeline`) return "started" immediately and still Slack their result when done, so dispatch-and-forget works exactly as before. The workflow fails the run on any HTTP ≥ 400 so errors are obvious in `gh run view`.
 
+## Cron failures must be loud (watchdog)
+
+Each cron ends with an `if: failure()` step that DMs Chip. **That step is not sufficient on its own** and you must not treat it as the safety net:
+
+- It only runs once a runner is assigned. On 2026-08-06 the digest run (`31124359130`) never got one — annotation "The job was not acquired by Runner of type hosted", `runner_name: ""`, no step logs. No step ran, so no notification ran, and the Thursday digest was silently never sent.
+- It cannot see a schedule that never fires. GitHub drops and delays scheduled events (that same run queued 1h52m after its cron); a dropped run leaves nothing to fail on.
+
+`.github/workflows/watchdog.yml` + `.github/scripts/watchdog.py` cover both, from outside, in their own run: hourly sweep plus a `workflow_run` trigger. It alerts on failed runs in the last 26h and on any cron in `STALENESS_HOURS` whose last **success** is older than its threshold. Repeat alerts are suppressed via a state file carried in the Actions cache.
+
+- **Adding a cron?** Add it to `workflow_run.workflows` in `watchdog.yml` (by workflow *name*) and to `STALENESS_HOURS` in `watchdog.py` (by *filename*), threshold = longest legitimate gap + ~1 period. A cron the watchdog doesn't know about is a cron that can die quietly.
+- **Test the alarms for real**: dispatch **Watchdog canary** — it fails on purpose and should yield two DMs (its own notifier, then the watchdog). `watchdog.yml` dispatch also has `test-slack` (delivery only) and `dry-run` (prints, posts nothing). Do this after touching `notify-failure`; an untested alarm is not an alarm.
+
 ## Git flow
 
 - Develop on `claude/add-legislature-bill-tracking-Uq9t2` (current branch). 

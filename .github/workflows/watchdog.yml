@@ -1,0 +1,91 @@
+# Outside observer for every other workflow in this repo.
+#
+# The `if: failure()` notifier inside each cron can only run after a runner has
+# been assigned, so it is blind to the failure that actually happened on
+# 2026-08-06: run 31124359130 of the Slack digest never got a runner ("The job
+# was not acquired by Runner of type hosted"), ran no steps, sent no digest,
+# and told nobody. It is equally blind to a schedule that never fires, since
+# that leaves no run to fail.
+#
+# This workflow watches from outside, in its own run, on three triggers:
+#   * workflow_run  — a watched workflow finished badly; alert within ~a minute.
+#   * schedule      — hourly sweep, the backstop. Catches missed schedules, and
+#                     catches failures the workflow_run path itself missed.
+#   * dispatch      — manual sweep, plus `test-slack` to prove delivery.
+#
+# All three run the same sweep, so there is one code path to trust. Repeat
+# alerts are suppressed by a state file carried between runs in the Actions
+# cache; see .github/scripts/watchdog.py.
+#
+# To test the whole chain for real, dispatch "Watchdog canary" — it fails on
+# purpose and should produce two DMs (its own notifier, then this watchdog).
+name: Cron watchdog
+
+on:
+  schedule:
+    # Hourly at :17 — off the hour, where the rest of the crons are queued.
+    - cron: "17 * * * *"
+  workflow_run:
+    workflows:
+      - "Daily pipeline"
+      - "Search sweep"
+      - "Twice-weekly Slack digest"
+      - "Weekly full pipeline"
+      - "verify-co-ingest"
+      - "Watchdog canary"
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "sweep (alert for real) | dry-run (print only) | test-slack (prove delivery)"
+        required: false
+        default: dry-run
+        type: choice
+        options:
+          - sweep
+          - dry-run
+          - test-slack
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  # A burst of failures should produce one sweep, not one sweep each. Never
+  # cancel an in-flight sweep — a cancelled watchdog is a silent watchdog.
+  group: watchdog
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Carries the "already alerted about this" list between runs so an
+      # unresolved failure is reported once, not once an hour. A cache miss is
+      # survivable: the sweep still runs and says in the alert that it may be
+      # repeating itself.
+      - name: Restore alert state
+        uses: actions/cache@v4
+        with:
+          path: .watchdog-state
+          key: watchdog-state-${{ github.run_id }}
+          restore-keys: |
+            watchdog-state-
+
+      - name: Sweep
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          WATCHDOG_STATE: .watchdog-state/state.json
+          # Only a manual dry-run stays quiet. Scheduled and workflow_run
+          # sweeps always post — a watchdog defaulting to silence is useless.
+          MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'sweep' }}
+        run: |
+          set -euo pipefail
+          case "$MODE" in
+            test-slack) python3 .github/scripts/watchdog.py --test-slack ;;
+            dry-run)    python3 .github/scripts/watchdog.py --dry-run ;;
+            *)          python3 .github/scripts/watchdog.py ;;
+          esac
