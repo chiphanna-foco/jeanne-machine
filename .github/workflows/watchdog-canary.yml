@@ -1,0 +1,42 @@
+# A workflow whose only job is to fail on demand, so the alarms can be tested
+# without breaking anything real.
+#
+# Dispatching this proves two things end to end in one run:
+#   1. .github/actions/notify-failure actually posts. It was added 2026-08-04
+#      and had never once fired — the only failure since (run 31124359130)
+#      never reached a step. An alarm nobody has heard ring is not an alarm.
+#   2. The "Cron watchdog" workflow_run trigger fires on a watched workflow's
+#      failure, which is the path that has to work when a cron dies before its
+#      own notifier can run.
+#
+# Expect two Slack DMs after dispatching: one from this job's notifier, one
+# from the watchdog sweep it triggers. Nothing else is affected — this job
+# talks to no endpoint and touches no data.
+name: Watchdog canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fail-on-purpose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail on purpose
+        run: |
+          echo "Deliberate failure: testing the failure-notification path."
+          echo "If you are reading this in a scheduled run, something is wrong —"
+          echo "this workflow is workflow_dispatch only."
+          exit 1
+
+      - name: Check out repo for failure notification
+        if: failure()
+        uses: actions/checkout@v4
+
+      - name: Notify Chip on failure
+        if: failure()
+        uses: ./.github/actions/notify-failure
+        with:
+          slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
