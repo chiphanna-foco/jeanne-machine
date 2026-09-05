@@ -54,9 +54,10 @@ from datetime import datetime, timedelta, timezone
 API = "https://api.github.com"
 SLACK_API = "https://slack.com/api/chat.postMessage"
 
-# Chip's Slack user ID -- DM, not a channel post. Same target as
-# .github/actions/notify-failure.
-SLACK_USER_ID = "U0645F5KJCQ"
+# #chip-ai channel -- this is a side project, so its alerts go to Chip's
+# personal-projects channel, not a DM. Same target as .github/actions/notify-failure
+# should eventually use (it still DMs -- see that file's comment).
+SLACK_CHANNEL_ID = "C0AC0C1L0NM"
 
 # Max age of the last SUCCESSFUL run before a cron is presumed missed.
 # Each is the longest legitimate gap plus roughly one period of slack, since
@@ -287,7 +288,7 @@ def build_message(
 def post_slack(token: str, text: str) -> None:
     payload = json.dumps(
         {
-            "channel": SLACK_USER_ID,
+            "channel": SLACK_CHANNEL_ID,
             "text": text,
             "unfurl_links": False,
         }
