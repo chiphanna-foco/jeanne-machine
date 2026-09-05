@@ -1,7 +1,8 @@
 name: 'Notify Chip on failure'
 description: >
-  DMs Chip on Slack when the calling workflow's run fails. Add as the last
-  step of a job with `if: failure()` so a dead cron doesn't die silently.
+  Posts to #chip-ai on Slack when the calling workflow's run fails. Add as
+  the last step of a job with `if: failure()` so a dead cron doesn't die
+  silently.
 
 inputs:
   slack-bot-token:
@@ -14,25 +15,26 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - name: Post Slack DM to Chip
+    - name: Post Slack alert to #chip-ai
       shell: bash
       env:
         SLACK_BOT_TOKEN: ${{ inputs.slack-bot-token }}
         WORKFLOW_NAME: ${{ github.workflow }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        # Chip's Slack user ID — DM, not a channel post.
-        SLACK_USER_ID: U0645F5KJCQ
+        # #chip-ai channel — jeanne-machine is a side project, so its alerts
+        # go here instead of Chip's personal DM.
+        SLACK_CHANNEL_ID: C0AC0C1L0NM
       run: |
         set -uo pipefail
 
         if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
-          echo "::warning::SLACK_BOT_TOKEN repo secret is not set — cannot DM Chip about this failure. Add it under Settings > Secrets and variables > Actions (chat:write scope, bot in the workspace)."
+          echo "::warning::SLACK_BOT_TOKEN repo secret is not set — cannot alert #chip-ai about this failure. Add it under Settings > Secrets and variables > Actions (chat:write scope, bot in the workspace)."
           exit 0
         fi
 
         text="🔴 jeanne-machine ${WORKFLOW_NAME} failed — ${RUN_URL}"
 
-        payload=$(jq -n --arg channel "$SLACK_USER_ID" --arg text "$text" \
+        payload=$(jq -n --arg channel "$SLACK_CHANNEL_ID" --arg text "$text" \
           '{channel: $channel, text: $text}')
 
         resp=$(curl -sS -w '\n%{http_code}' https://slack.com/api/chat.postMessage \
@@ -49,5 +51,5 @@ runs:
           # Don't print the full body (could echo the token back in rare
           # error payloads) — just the error code Slack returns.
           err=$(echo "$body" | jq -r '.error // "unknown"' 2>/dev/null || echo "unknown")
-          echo "::warning::Slack DM to Chip failed: ${err}"
+          echo "::warning::Slack alert to #chip-ai failed: ${err}"
         fi
