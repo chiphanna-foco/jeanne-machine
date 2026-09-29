@@ -109,6 +109,14 @@ class Settings(BaseSettings):
     # Enrichment thresholds
     relevance_confidence_threshold: float = 0.6
 
+    # Claude client limits. One hung call waits at most timeout x (retries+1)
+    # = 6 min; 5 failed docs in a row stop the run.
+    anthropic_timeout_seconds: float = 120.0
+    anthropic_max_retries: int = 2
+    # The daily run stops enriching after this long (the rest stay queued),
+    # so ingest + enrich finish inside the workflow's 150-minute verify window.
+    daily_enrich_time_budget_minutes: float = 75.0
+
     # Server
     port: int = 8000
 

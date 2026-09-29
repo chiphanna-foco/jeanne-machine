@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
@@ -13,6 +14,7 @@ from sqlalchemy import case, create_engine, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+from enrichment.claude_client import EnrichmentAPIError, EnrichmentParseError
 from storage.database import async_session, get_session
 from storage.models import Base, Jurisdiction, LawSnapshot, PolicyItem, RawDocument, Subscription
 
@@ -38,6 +40,12 @@ STATE_NAMES = {
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run DB migrations / table creation on startup."""
+    if not settings.anthropic_api_key:
+        # Not fatal: the dashboard and API still work. Every enrichment call
+        # fails fast as an api_error, so the daily run goes red.
+        logger.error(
+            "ANTHROPIC_API_KEY is not set: enrichment will fail and docs stay queued"
+        )
     try:
         sync_engine = create_engine(settings.sync_database_url)
         with sync_engine.connect() as conn:
@@ -94,7 +102,19 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "jeanne-machine"}
+    # Model IDs and the deployed commit are not secret; they answer "which
+    # code and which models are live?" without an admin token. The key
+    # itself is only reported as present or absent.
+    return {
+        "status": "ok",
+        "service": "jeanne-machine",
+        "git_sha": os.environ.get("RAILWAY_GIT_COMMIT_SHA") or "unknown",
+        "classifier_model": settings.classifier_model,
+        "summarizer_model": settings.summarizer_model,
+        # The synthesizer and drafter share the summarizer model today.
+        "synthesizer_model": settings.summarizer_model,
+        "anthropic_key_configured": bool(settings.anthropic_api_key),
+    }
 
 
 @app.get("/")
@@ -519,13 +539,102 @@ async def run_pipeline(
 
 # Simple in-memory status tracking
 _pipeline_status = {"running": False, "last_run": None, "last_result": None}
+# Last run per kind ("daily", "weekly_full", "search", ...). _pipeline_status
+# is overwritten by whichever task ran last (the 2-hourly search sweep, for
+# one), so the daily cron's verify step reads its own record from here.
+# In memory: a redeploy clears it, and the verify step treats a missing
+# record as a failure.
+_last_runs: dict[str, dict] = {}
+
+
+_run_seq = 0
+
+
+def _start_run(kind: str | None, run_token: str | None = None) -> str | None:
+    """Claim the `kind` record for a new run. Returns the run's token."""
+    global _run_seq
+    if not kind:
+        return run_token
+    if run_token is None:
+        _run_seq += 1
+        run_token = f"{datetime.utcnow().isoformat()}#{_run_seq}"
+    _last_runs[kind] = {
+        "run_token": run_token,
+        "running": True,
+        "finished_at": None,
+        "result": None,
+    }
+    return run_token
+
+
+def _finish_run(kind: str | None, run_token: str | None, results: dict) -> None:
+    """Store a run's result, but only if the record still belongs to that run.
+
+    A slow older task must not overwrite a newer run's record.
+    """
+    if not kind:
+        return
+    current = _last_runs.get(kind)
+    if current is None or current.get("run_token") != run_token:
+        logger.warning(f"Run record for {kind} belongs to a newer run; not overwriting")
+        return
+    _last_runs[kind] = {
+        "run_token": run_token,
+        "running": False,
+        "finished_at": datetime.utcnow().isoformat(),
+        "result": results,
+    }
 
 
 @app.get("/admin/pipeline-status")
 async def pipeline_status(token: str | None = Query(default=None)):
     if not _check_admin_token(token):
         return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
-    return _pipeline_status
+    return {**_pipeline_status, "last_by_kind": _last_runs}
+
+
+async def _enrich_queue(
+    raw_ids: list[int],
+    results: dict,
+    new_item_ids: list[int] | None = None,
+    time_budget_minutes: float | None = None,
+) -> None:
+    """Enrich each queued doc in its own session, counting outcomes in `results`.
+
+    `results` must carry enrichment.pipeline.new_run_counters() keys. Stops
+    early (docs stay queued for the next run) when the Claude API is down,
+    or when `time_budget_minutes` runs out.
+    """
+    import time
+
+    from enrichment.pipeline import api_should_stop, enrich_counted
+
+    deadline = time.monotonic() + time_budget_minutes * 60 if time_budget_minutes else None
+    results["queued"] += len(raw_ids)
+    for raw_id in raw_ids:
+        if api_should_stop(results):
+            break
+        if deadline is not None and time.monotonic() > deadline:
+            results["stopped_for_time"] = True
+            logger.warning(
+                f"Enrichment time budget ({time_budget_minutes} min) used; "
+                "the rest stay queued for the next run"
+            )
+            break
+        try:
+            async with async_session() as session:
+                raw = await session.get(RawDocument, raw_id)
+                if not raw:
+                    continue
+                item = await enrich_counted(session, raw, results)
+                if item and new_item_ids is not None:
+                    new_item_ids.append(item.id)
+                await session.commit()
+        except Exception as e:
+            err = f"enrich raw_id={raw_id}: {type(e).__name__}: {str(e)[:300]}"
+            logger.error(err)
+            results["errors"].append(err)
+    results["enriched"] = results["relevant"]
 
 
 async def _legiscan_seen_change_hashes() -> dict[int, str]:
@@ -694,12 +803,18 @@ async def _run_pipeline_task(
     days_back: int,
     batch_size: int,
     states_filter: list[str] | None = None,
+    run_kind: str | None = None,
+    run_token: str | None = None,
 ):
     """Background task: ingest from all adapters, then enrich."""
     global _pipeline_status
     _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
+    if run_token is None:  # cron-daily already claimed its record
+        run_token = _start_run(run_kind)
 
-    results = {"ingested": 0, "enriched": 0, "irrelevant": 0, "errors": []}
+    from enrichment.pipeline import new_run_counters
+
+    results = {"ingested": 0, "enriched": 0, **new_run_counters(), "errors": []}
     new_item_ids: list[int] = []
 
     try:
@@ -713,7 +828,7 @@ async def _run_pipeline_task(
         from adapters.legistar import LegistarAdapter
         from adapters.openstates import ALL_STATES, OpenStatesAdapter
         from adapters.wa_leg import WaLegAdapter
-        from enrichment.pipeline import enrich_document, ingest_raw_doc
+        from enrichment.pipeline import ingest_raw_doc
 
         # States we pull directly from LegiScan (coverage-gap backstop). These
         # are excluded from the Open States sweep below so we don't double-ingest.
@@ -809,24 +924,17 @@ async def _run_pipeline_task(
             result = await session.execute(query)
             raw_ids = list(result.scalars().all())
 
-        # Then enrich each doc in its own session — one failure won't kill the batch
-        for raw_id in raw_ids:
-            try:
-                async with async_session() as session:
-                    raw = await session.get(RawDocument, raw_id)
-                    if not raw:
-                        continue
-                    item = await enrich_document(session, raw)
-                    if item:
-                        results["enriched"] += 1
-                        new_item_ids.append(item.id)
-                    else:
-                        results["irrelevant"] += 1
-                    await session.commit()
-            except Exception as e:
-                err = f"enrich raw_id={raw_id}: {type(e).__name__}: {str(e)[:300]}"
-                logger.error(err)
-                results["errors"].append(err)
+        # Then enrich each doc in its own session — one failure won't kill the batch.
+        # The daily run gets a time budget so it finishes inside the
+        # workflow's 150-minute verify window.
+        await _enrich_queue(
+            raw_ids,
+            results,
+            new_item_ids,
+            time_budget_minutes=settings.daily_enrich_time_budget_minutes
+            if run_kind == "daily"
+            else None,
+        )
 
         # ── Step 3: Slack push — act-now items only, capped, compact ──
         if new_item_ids and settings.slack_webhook_url:
@@ -841,6 +949,7 @@ async def _run_pipeline_task(
         "last_run": datetime.utcnow().isoformat(),
         "last_result": results,
     }
+    _finish_run(run_kind, run_token, results)
 
 
 @app.get("/admin/run-enrich")
@@ -889,11 +998,11 @@ async def _run_enrich_task(
     global _pipeline_status
     _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
 
-    results = {"enriched": 0, "irrelevant": 0, "errors": []}
+    from enrichment.pipeline import new_run_counters
+
+    results = {"enriched": 0, **new_run_counters(), "errors": []}
 
     try:
-        from enrichment.classifier import classify_document
-        from enrichment.summarizer import summarize_document
         from storage.models import SourceAdapter
 
         # Temporarily override the confidence threshold
@@ -916,22 +1025,7 @@ async def _run_enrich_task(
 
         logger.info(f"Enrich-only: {len(raw_ids)} docs to process")
 
-        from enrichment.pipeline import enrich_document
-
-        for raw_id in raw_ids:
-            try:
-                async with async_session() as session:
-                    raw = await session.get(RawDocument, raw_id)
-                    if not raw:
-                        continue
-                    item = await enrich_document(session, raw)
-                    if item:
-                        results["enriched"] += 1
-                    else:
-                        results["irrelevant"] += 1
-                    await session.commit()
-            except Exception as e:
-                results["errors"].append(f"enrich raw_id={raw_id}: {type(e).__name__}: {str(e)[:300]}")
+        await _enrich_queue(raw_ids, results)
 
         settings.relevance_confidence_threshold = original_threshold
 
@@ -1002,11 +1096,14 @@ async def _run_drain_task(
         "last_result": None,
     }
 
+    from enrichment.pipeline import api_should_stop, enrich_counted, new_run_counters
+
     totals = {
         "batches_run": 0,
         "total_enriched": 0,
         "total_irrelevant": 0,
         "total_prefiltered": 0,
+        **new_run_counters(),
         "errors": [],
         "stopped_reason": None,
     }
@@ -1015,7 +1112,6 @@ async def _run_drain_task(
         from datetime import datetime as _dt
 
         from enrichment.keywords import passes_keyword_prescreen
-        from enrichment.pipeline import enrich_document
         from storage.models import SourceAdapter
 
         original_threshold = settings.relevance_confidence_threshold
@@ -1043,7 +1139,11 @@ async def _run_drain_task(
             batch_enriched = 0
             batch_irrelevant = 0
             batch_prefiltered = 0
+            api_errors_before = totals["api_errors"]
+            totals["queued"] += len(raw_ids)
             for raw_id in raw_ids:
+                if api_should_stop(totals):
+                    break
                 try:
                     async with async_session() as session:
                         raw = await session.get(RawDocument, raw_id)
@@ -1056,10 +1156,11 @@ async def _run_drain_task(
                             await session.commit()
                             batch_prefiltered += 1
                             continue
-                        item = await enrich_document(session, raw)
+                        irrelevant_before = totals["irrelevant"]
+                        item = await enrich_counted(session, raw, totals)
                         if item:
                             batch_enriched += 1
-                        else:
+                        elif totals["irrelevant"] > irrelevant_before:
                             batch_irrelevant += 1
                         await session.commit()
                 except Exception as e:
@@ -1077,6 +1178,15 @@ async def _run_drain_task(
             )
             # Reflect progress between batches so polling shows live counts
             _pipeline_status["last_result"] = dict(totals)
+
+            # Docs that hit an API error are still queued, so the next batch
+            # would pick the same ones again. Stop; the next run retries them.
+            if totals["api_errors"] > api_errors_before:
+                totals["stopped_reason"] = (
+                    f"Claude API errors ({totals['api_stop_reason'] or 'transient'}); "
+                    "failed docs stay queued for the next run"
+                )
+                break
 
         if totals["stopped_reason"] is None:
             totals["stopped_reason"] = f"max_batches={max_batches} reached"
@@ -1105,12 +1215,20 @@ async def _run_drain_task(
                 filters.append(f"state={state.upper()}")
             filter_str = " ".join(filters) if filters else "no filters"
             err_str = f", {len(totals['errors'])} errors" if totals["errors"] else ""
+            api_str = (
+                f", {totals['api_errors']} Claude API errors (docs kept for retry)"
+                if totals["api_errors"]
+                else ""
+            )
+            parse_str = (
+                f", {totals['parse_errors']} unparseable" if totals["parse_errors"] else ""
+            )
             text = (
                 f"*Drain done* ({filter_str}): "
                 f"{totals['total_enriched']} enriched, "
                 f"{totals['total_irrelevant']} irrelevant, "
                 f"{totals['total_prefiltered']} keyword-skipped, "
-                f"{totals['batches_run']} batches{err_str}. "
+                f"{totals['batches_run']} batches{err_str}{api_str}{parse_str}. "
                 f"Stopped: {totals['stopped_reason']}."
             )
             blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
@@ -1908,8 +2026,17 @@ async def cron_daily(token: str | None = Query(default=None)):
     if not _check_admin_token(token):
         return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
 
-    asyncio.create_task(_run_pipeline_task(days_back=3, batch_size=300))
-    return {"status": "started", "message": "Daily cron pipeline started (3 days back, 300 enrichment batch)."}
+    # run_token lets the workflow's verify step find THIS run's record in
+    # /admin/pipeline-status -> last_by_kind.daily, not yesterday's.
+    run_token = _start_run("daily")
+    asyncio.create_task(
+        _run_pipeline_task(days_back=3, batch_size=300, run_kind="daily", run_token=run_token)
+    )
+    return {
+        "status": "started",
+        "run_token": run_token,
+        "message": "Daily cron pipeline started (3 days back, 300 enrichment batch).",
+    }
 
 
 async def _run_search_sweep_task():
@@ -1923,11 +2050,14 @@ async def _run_search_sweep_task():
     """
     global _pipeline_status
     _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
-    results = {"ingested": 0, "enriched": 0, "irrelevant": 0, "errors": []}
+    run_token = _start_run("search")
+    from enrichment.pipeline import new_run_counters
+
+    results = {"ingested": 0, "enriched": 0, **new_run_counters(), "errors": []}
     new_item_ids: list[int] = []
     try:
         from adapters.legiscan_search import LegiScanSearchAdapter
-        from enrichment.pipeline import enrich_document, ingest_raw_doc
+        from enrichment.pipeline import ingest_raw_doc
 
         ls_seen = await _legiscan_seen_change_hashes()
         ls_budget = await _legiscan_budget_remaining()
@@ -1942,6 +2072,7 @@ async def _run_search_sweep_task():
                 "last_run": datetime.utcnow().isoformat(),
                 "last_result": results,
             }
+            _finish_run("search", run_token, results)
             return
         adapter = LegiScanSearchAdapter(seen_change_hashes=ls_seen, budget_remaining=ls_budget)
         try:
@@ -1962,21 +2093,8 @@ async def _run_search_sweep_task():
         results["legiscan_search_stats"] = adapter.last_run_stats.get("_totals", {})
 
         # Enrich exactly what this sweep ingested — nothing waits for a batch.
-        for raw_id in new_raw_ids:
-            try:
-                async with async_session() as session:
-                    raw = await session.get(RawDocument, raw_id)
-                    if not raw:
-                        continue
-                    item = await enrich_document(session, raw)
-                    if item:
-                        results["enriched"] += 1
-                        new_item_ids.append(item.id)
-                    else:
-                        results["irrelevant"] += 1
-                    await session.commit()
-            except Exception as e:
-                results["errors"].append(f"enrich raw_id={raw_id}: {type(e).__name__}: {str(e)[:200]}")
+        # Docs that hit an API error stay queued; the daily run picks them up.
+        await _enrich_queue(new_raw_ids, results, new_item_ids)
 
         if new_item_ids and settings.slack_webhook_url:
             await _push_act_now_alerts(new_item_ids, results)
@@ -1989,6 +2107,7 @@ async def _run_search_sweep_task():
         "last_run": datetime.utcnow().isoformat(),
         "last_result": results,
     }
+    _finish_run("search", run_token, results)
 
 
 @app.get("/admin/cron-search")
@@ -2850,7 +2969,7 @@ async def _run_refresh_laws_task(min_items: int, max_pairs: int):
     global _pipeline_status
     _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
 
-    results = {"synthesized": 0, "skipped": 0, "errors": []}
+    results = {"synthesized": 0, "skipped": 0, "api_errors": 0, "parse_errors": 0, "errors": []}
 
     try:
         from enrichment.law_synthesizer import (
@@ -2873,6 +2992,15 @@ async def _run_refresh_laws_task(min_items: int, max_pairs: int):
                     else:
                         results["skipped"] += 1
                     await session.commit()
+            except EnrichmentAPIError as e:
+                # The old snapshot is left as is; its updated_at stays old.
+                results["api_errors"] += 1
+                results["errors"].append(f"synthesize jur={jur_id} topic={topic}: {e}")
+                if e.definitive:
+                    break
+            except EnrichmentParseError as e:
+                results["parse_errors"] += 1
+                results["errors"].append(f"synthesize jur={jur_id} topic={topic}: {e}")
             except Exception as e:
                 err = f"synthesize jur={jur_id} topic={topic}: {type(e).__name__}: {str(e)[:200]}"
                 logger.error(err)
@@ -2920,11 +3048,16 @@ async def _run_weekly_full_task():
     global _pipeline_status
     _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
 
+    run_token = _start_run("weekly_full")
+    from enrichment.pipeline import new_run_counters
+
     results = {
         "ingested": 0,
         "enriched": 0,
-        "irrelevant": 0,
+        **new_run_counters(),
         "laws_synthesized": 0,
+        "synth_api_errors": 0,
+        "synth_parse_errors": 0,
         "slack_sent": False,
         "slack_item_count": 0,
         "errors": [],
@@ -2937,7 +3070,7 @@ async def _run_weekly_full_task():
         from adapters.federal_register import FederalRegisterAdapter
         from adapters.legistar import LegistarAdapter
         from adapters.openstates import ALL_STATES, OpenStatesAdapter
-        from enrichment.pipeline import enrich_document, ingest_raw_doc
+        from enrichment.pipeline import ingest_raw_doc
 
         since = datetime.utcnow() - timedelta(days=7)
         os_states = ALL_STATES if settings.openstates_scope == "all" else None
@@ -2975,20 +3108,7 @@ async def _run_weekly_full_task():
             result = await session.execute(query)
             raw_ids = list(result.scalars().all())
 
-        for raw_id in raw_ids:
-            try:
-                async with async_session() as session:
-                    raw = await session.get(RawDocument, raw_id)
-                    if not raw:
-                        continue
-                    item = await enrich_document(session, raw)
-                    if item:
-                        results["enriched"] += 1
-                    else:
-                        results["irrelevant"] += 1
-                    await session.commit()
-            except Exception as e:
-                results["errors"].append(f"enrich {raw_id}: {str(e)[:200]}")
+        await _enrich_queue(raw_ids, results)
 
         # Step 3: refresh law snapshots for pairs with new activity
         try:
@@ -3007,6 +3127,15 @@ async def _run_weekly_full_task():
                         if snap:
                             results["laws_synthesized"] += 1
                         await session.commit()
+                except EnrichmentAPIError as e:
+                    # The old snapshot is left as is; its updated_at stays old.
+                    results["synth_api_errors"] += 1
+                    results["errors"].append(f"synth {jur_id}/{topic}: {e}")
+                    if e.definitive:
+                        break
+                except EnrichmentParseError as e:
+                    results["synth_parse_errors"] += 1
+                    results["errors"].append(f"synth {jur_id}/{topic}: {e}")
                 except Exception as e:
                     results["errors"].append(f"synth {jur_id}/{topic}: {str(e)[:150]}")
         except Exception as e:
@@ -3044,6 +3173,7 @@ async def _run_weekly_full_task():
         "last_run": datetime.utcnow().isoformat(),
         "last_result": results,
     }
+    _finish_run("weekly_full", run_token, results)
 
 
 # ── Content Drafts ─────────────────────────────────────────────────
@@ -3130,14 +3260,14 @@ async def _run_draft_generation(min_impact: str, max_drafts: int):
     global _pipeline_status
     _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
 
-    results = {"generated": 0, "errors": []}
+    results = {"generated": 0, "api_errors": 0, "parse_errors": 0, "errors": []}
 
     try:
         from enrichment.content_drafter import generate_drafts_for_high_impact
 
         async with async_session() as session:
             drafts = await generate_drafts_for_high_impact(
-                session, min_impact=min_impact, max_drafts=max_drafts
+                session, min_impact=min_impact, max_drafts=max_drafts, counters=results
             )
             results["generated"] = len(drafts)
             await session.commit()

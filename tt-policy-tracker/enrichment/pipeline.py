@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from adapters.base import RawDoc
 from config import settings
+from enrichment.claude_client import EnrichmentAPIError, EnrichmentParseError
 from enrichment.classifier import classify_document
 from enrichment.geotagger import geotag_from_adapter
 from enrichment.keywords import has_housing_subject_tag
@@ -92,7 +93,12 @@ async def ingest_raw_doc(session: AsyncSession, doc: RawDoc) -> RawDocument | No
 async def enrich_document(session: AsyncSession, raw: RawDocument) -> PolicyItem | None:
     """Run the full enrichment pipeline on a single RawDocument.
 
-    Returns the created PolicyItem, or None if the document was classified as irrelevant.
+    Returns the created PolicyItem, or None if the document was classified as
+    irrelevant (or already enriched).
+
+    Raises EnrichmentAPIError (doc left unclassified, retried next run) or
+    EnrichmentParseError (doc marked classified; caller must commit).
+    Callers that loop over a queue should use enrich_counted() instead.
     """
     # Check if already enriched
     existing = await session.execute(
@@ -104,12 +110,17 @@ async def enrich_document(session: AsyncSession, raw: RawDocument) -> PolicyItem
 
     text = raw.raw_text or ""
 
-    # Stage 1: Classify relevance (Haiku — cheap and fast)
-    classification = await classify_document(text)
-    # Mark the doc classified BEFORE returning, so the next queue scan skips
-    # it whether the classifier said yes or no. The caller commits the
-    # session, which persists this even on the no-policy-item path.
-    raw.classified_at = datetime.utcnow()
+    # Stage 1: Classify relevance (Haiku — cheap and fast).
+    # classified_at is set ONLY after a definitive verdict: a real
+    # "irrelevant", or relevant plus a successful summary. An
+    # EnrichmentAPIError propagates with classified_at still null, so the
+    # next run retries the doc. Unparseable output (after one retry) is the
+    # one failure that consumes the doc, so it cannot retry forever.
+    try:
+        classification = await classify_document(text)
+    except EnrichmentParseError:
+        raw.classified_at = datetime.utcnow()
+        raise
 
     # Strong curated-subject override: a bill tagged with a housing subject
     # (e.g. LegiScan "Subjects: Housing") is high-precision relevant even when
@@ -131,14 +142,17 @@ async def enrich_document(session: AsyncSession, raw: RawDocument) -> PolicyItem
         logger.info(
             f"Irrelevant (conf={classification['confidence']:.2f}): {raw.external_id}"
         )
+        raw.classified_at = datetime.utcnow()
         return None
 
-    # Stage 3: Summarize (Sonnet — more expensive, only for relevant docs)
+    # Stage 3: Summarize (Sonnet — more expensive, only for relevant docs).
+    # Same rule: an API failure leaves the doc retryable.
     try:
         summary = await summarize_document(text)
-    except Exception as e:
-        logger.error(f"Summarization failed for {raw.external_id}: {e}")
-        return None
+    except EnrichmentParseError:
+        raw.classified_at = datetime.utcnow()
+        raise
+    raw.classified_at = datetime.utcnow()
 
     # Parse effective date
     effective_date = None
@@ -169,4 +183,76 @@ async def enrich_document(session: AsyncSession, raw: RawDocument) -> PolicyItem
     logger.info(
         f"Enriched: {item.title} (impact={item.impact_score}, topics={item.topic_tags})"
     )
+    return item
+
+
+# Consecutive transient API failures before a run stops calling the API.
+# A dead key or a sustained 429 would otherwise burn the whole batch.
+MAX_CONSECUTIVE_API_ERRORS = 5
+# How many parse-consumed external_ids a run keeps, so they can be healed.
+MAX_PARSE_FAILED_IDS = 20
+
+
+def new_run_counters() -> dict:
+    """Counters every enrichment run returns and stores in its run status.
+
+    processed = docs that reached a definitive verdict (relevant + irrelevant).
+    """
+    return {
+        "queued": 0,
+        "processed": 0,
+        "relevant": 0,
+        "irrelevant": 0,
+        "api_errors": 0,
+        "parse_errors": 0,
+        "parse_failed_ids": [],
+        "consecutive_api_errors": 0,
+        "api_stop_reason": None,
+    }
+
+
+def api_should_stop(counters: dict) -> bool:
+    """True when the run should stop calling Claude (retry next run)."""
+    return counters.get("api_stop_reason") is not None
+
+
+async def enrich_counted(
+    session: AsyncSession, raw: RawDocument, counters: dict
+) -> PolicyItem | None:
+    """enrich_document() plus bookkeeping for queue loops.
+
+    Returns the PolicyItem or None. Never raises the two enrichment errors;
+    it counts them. The caller commits the session either way: after an API
+    error nothing on `raw` changed, after a parse error `classified_at` is set.
+    """
+    try:
+        item = await enrich_document(session, raw)
+    except EnrichmentAPIError as e:
+        counters["api_errors"] += 1
+        counters["consecutive_api_errors"] += 1
+        logger.error(f"Claude API error, doc left for retry: {raw.external_id}: {e}")
+        if e.definitive:
+            counters["api_stop_reason"] = f"{e.kind}: stopped at first failure"
+        elif counters["consecutive_api_errors"] >= MAX_CONSECUTIVE_API_ERRORS:
+            counters["api_stop_reason"] = (
+                f"{e.kind}: {MAX_CONSECUTIVE_API_ERRORS} API errors in a row"
+            )
+        return None
+    except EnrichmentParseError as e:
+        counters["parse_errors"] += 1
+        counters["consecutive_api_errors"] = 0
+        if len(counters["parse_failed_ids"]) < MAX_PARSE_FAILED_IDS:
+            counters["parse_failed_ids"].append(raw.external_id)
+        logger.error(f"Unparseable model output, doc consumed: {raw.external_id}: {e}")
+        return None
+
+    counters["consecutive_api_errors"] = 0
+    if raw.classified_at is None:
+        # Already had a PolicyItem; nothing was decided this run.
+        return item
+    counters["processed"] += 1
+    if item:
+        counters["relevant"] += 1
+    else:
+        counters["irrelevant"] += 1
     return item

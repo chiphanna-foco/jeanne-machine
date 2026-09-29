@@ -9,15 +9,14 @@ only the policy activity we've observed via our feeds. We flag this in the
 caveats field of every snapshot.
 """
 
-import json
 import logging
 from datetime import datetime
 
-import anthropic
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+from enrichment.claude_client import create_json
 from storage.models import Jurisdiction, LawSnapshot, PolicyItem
 
 logger = logging.getLogger(__name__)
@@ -82,7 +81,12 @@ async def synthesize_law_snapshot(
     topic: str,
     items: list[PolicyItem],
 ) -> LawSnapshot | None:
-    """Synthesize or update a LawSnapshot for a (jurisdiction, topic) pair."""
+    """Synthesize or update a LawSnapshot for a (jurisdiction, topic) pair.
+
+    Raises EnrichmentAPIError / EnrichmentParseError instead of returning
+    None, so the run counts the failure. The existing snapshot is untouched,
+    so its updated_at shows how stale it is.
+    """
     if not items:
         return None
 
@@ -109,24 +113,13 @@ async def synthesize_law_snapshot(
         + "\n\n".join(item_blocks)
     )
 
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-
-    try:
-        response = await client.messages.create(
-            model=settings.summarizer_model,
-            max_tokens=800,
-            system=SYNTHESIZER_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        raw = response.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-        result = json.loads(raw)
-    except (json.JSONDecodeError, anthropic.APIError) as e:
-        logger.error(f"Law synthesizer failed for {jur_name}/{topic}: {e}")
-        return None
+    result = await create_json(
+        f"law synthesizer {jur_name}/{topic}",
+        model=settings.summarizer_model,
+        max_tokens=800,
+        system=SYNTHESIZER_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+    )
 
     valid_confidence = {"low", "med", "high"}
     confidence = result.get("confidence", "med")

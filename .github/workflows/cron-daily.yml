@@ -1,5 +1,13 @@
 # Fires /admin/cron-daily so the search pipeline runs even when nobody
 # clicks the admin button. Requires repo secrets API_BASE_URL and ADMIN_TOKEN.
+#
+# The endpoint only starts a background task and answers "started", so a
+# green trigger proves nothing. The verify step polls this run's own record
+# in /admin/pipeline-status (last_by_kind.daily, matched by run_token) and
+# fails the job when Claude API calls failed or queued docs were not
+# processed. The checks live in .github/scripts/verify_daily.py.
+# A failed job posts to #chip-ai below, and the watchdog sees it.
+# This repo is public: the verify step prints counters only, never the body.
 name: Daily pipeline
 
 on:
@@ -7,9 +15,18 @@ on:
     - cron: "0 10 * * *"
   workflow_dispatch:
 
+# One daily run at a time. A manual dispatch waits for the scheduled run
+# instead of overwriting its status record or enriching the same queue twice.
+concurrency:
+  group: cron-daily
+  cancel-in-progress: false
+
 jobs:
   trigger:
     runs-on: ubuntu-latest
+    # The run takes tens of minutes (OpenStates is paced at 8 s per request,
+    # then up to 300 docs are enriched). Verify waits up to 150 minutes.
+    timeout-minutes: 170
     steps:
       - name: Hit /admin/cron-daily
         env:
@@ -22,7 +39,19 @@ jobs:
             exit 1
           fi
           curl -sS --fail-with-body --max-time 30 \
-            "${API_BASE_URL%/}/admin/cron-daily?token=${ADMIN_TOKEN}"
+            "${API_BASE_URL%/}/admin/cron-daily?token=${ADMIN_TOKEN}" > trigger.json
+          jq -c '{status, run_token}' trigger.json
+
+      - name: Check out repo for the verify script
+        uses: actions/checkout@v4
+        with:
+          path: repo
+
+      - name: Verify the run (red on API or parse errors, nothing processed, or nothing ingested)
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: python3 repo/.github/scripts/verify_daily.py trigger.json
 
       - name: Check out repo for failure notification
         if: failure()

@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 sys.path.insert(0, ".")
 
-from enrichment.pipeline import enrich_document
+from enrichment.pipeline import api_should_stop, enrich_counted, new_run_counters
 from storage.database import async_session
 from storage.models import PolicyItem, RawDocument
 
@@ -40,24 +40,25 @@ async def run_enrichment(batch_size: int):
 
         logger.info(f"Found {len(raw_docs)} un-enriched documents")
 
-        enriched = 0
-        irrelevant = 0
+        counters = new_run_counters()
+        counters["queued"] = len(raw_docs)
         errors = 0
 
         for raw in raw_docs:
+            if api_should_stop(counters):
+                logger.error(f"Stopping: {counters['api_stop_reason']}")
+                break
             try:
-                item = await enrich_document(session, raw)
-                if item:
-                    enriched += 1
-                else:
-                    irrelevant += 1
+                await enrich_counted(session, raw, counters)
             except Exception as e:
                 logger.error(f"Error enriching {raw.external_id}: {e}")
                 errors += 1
 
         await session.commit()
         logger.info(
-            f"Enrichment complete: {enriched} enriched, {irrelevant} irrelevant, {errors} errors"
+            f"Enrichment complete: {counters['relevant']} enriched, "
+            f"{counters['irrelevant']} irrelevant, {counters['api_errors']} API errors "
+            f"(left for retry), {counters['parse_errors']} unparseable, {errors} other errors"
         )
 
 
