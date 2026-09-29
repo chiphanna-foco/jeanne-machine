@@ -42,7 +42,7 @@ export default function DraftsPage() {
     const params = new URLSearchParams();
     if (statusFilter) params.set("status", statusFilter);
 
-    fetch(`/api/drafts?${params}`)
+    fetch(`/backend/api/drafts?${params}`)
       .then((r) => {
         if (!r.ok) throw new Error(`API returned ${r.status}`);
         return r.json();
@@ -57,9 +57,19 @@ export default function DraftsPage() {
 
   useEffect(fetchDrafts, [statusFilter]);
 
+  // Deep link from a policy card: /drafts?highlight=<draftId> opens that draft.
+  const [highlightDone, setHighlightDone] = useState(false);
+  useEffect(() => {
+    if (highlightDone || drafts.length === 0) return;
+    const id = Number(new URLSearchParams(window.location.search).get("highlight"));
+    const match = id ? drafts.find((d) => d.id === id) : undefined;
+    if (match) setSelected(match);
+    setHighlightDone(true);
+  }, [drafts, highlightDone]);
+
   const updateStatus = async (draftId: number, newStatus: string) => {
     try {
-      const resp = await fetch(`/api/drafts/${draftId}/status?new_status=${newStatus}`, {
+      const resp = await fetch(`/backend/api/drafts/${draftId}/status?new_status=${newStatus}`, {
         method: "POST",
       });
       if (resp.ok) {

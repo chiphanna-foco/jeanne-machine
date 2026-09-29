@@ -34,6 +34,8 @@ jobs:
           # avoid shell-injection and quoting issues with & and = in queries.
           BASE: ${{ secrets.API_BASE_URL }}
           TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          # Only /api/* paths need it; /admin/* ignores the header.
+          JEANNE_API_KEY: ${{ secrets.JEANNE_API_KEY }}
           ADMIN_PATH: ${{ inputs.path }}
           ADMIN_QUERY: ${{ inputs.query }}
         run: |
@@ -59,7 +61,7 @@ jobs:
           echo "GET ${base}/${path}?${ADMIN_QUERY:-}"
           echo "--------------------------------------------------------"
 
-          code=$(curl -sS --max-time 280 -w '%{http_code}' -o resp.body "$url" || echo "000")
+          code=$(curl -sS --max-time 280 -H "X-Jeanne-Key: ${JEANNE_API_KEY:-}" -w '%{http_code}' -o resp.body "$url" || echo "000")
           echo "HTTP_STATUS=${code}"
           echo "--------------------- response body --------------------"
           if command -v jq >/dev/null 2>&1; then

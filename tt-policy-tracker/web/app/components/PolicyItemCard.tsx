@@ -54,12 +54,69 @@ export function PolicyItemCard({ item }: { item: PolicyItem }) {
     setFb(label); // optimistic
     setBusy(true);
     try {
-      const r = await fetch(`/api/items/${item.id}/feedback?label=${label}`, { method: "POST" });
+      const r = await fetch(`/backend/api/items/${item.id}/feedback?label=${label}`, { method: "POST" });
       if (!r.ok) throw new Error(`API ${r.status}`);
     } catch {
       setFb(prev); // revert on failure
     } finally {
       setBusy(false);
+    }
+  }
+
+  // "Draft blog post": POST starts the drafter on Railway (or returns the
+  // existing draft), then poll GET until the draft exists.
+  const [draftState, setDraftState] = useState<"idle" | "drafting" | "ready" | "failed">("idle");
+  const [draftId, setDraftId] = useState<number | null>(null);
+  const [draftNote, setDraftNote] = useState<string | null>(null);
+
+  async function pollDraft(attempt = 0) {
+    if (attempt > 60) {
+      setDraftState("failed");
+      setDraftNote("Still drafting after 3 minutes. Check Content Drafts later.");
+      return;
+    }
+    try {
+      const r = await fetch(`/backend/api/items/${item.id}/drafts`, { cache: "no-store" });
+      const data = await r.json();
+      if (r.ok && data.status === "exists") {
+        setDraftId(data.draft.id);
+        setDraftState("ready");
+        return;
+      }
+      if (!r.ok || data.status === "failed" || data.status === "none") {
+        setDraftState("failed");
+        setDraftNote(data.error || `Draft failed (${r.status})`);
+        return;
+      }
+    } catch {
+      // transient network error: keep polling
+    }
+    setTimeout(() => pollDraft(attempt + 1), 3000);
+  }
+
+  async function startDraft() {
+    if (draftState === "drafting") return;
+    setDraftState("drafting");
+    setDraftNote(null);
+    try {
+      const r = await fetch(`/backend/api/items/${item.id}/drafts`, { method: "POST" });
+      const data = await r.json();
+      if (r.status === 200 && data.status === "exists") {
+        setDraftId(data.draft.id);
+        setDraftNote(data.note || null);
+        setDraftState("ready");
+      } else if (r.status === 202) {
+        setTimeout(() => pollDraft(0), 3000);
+      } else if (r.status === 429) {
+        setDraftState("failed");
+        setDraftNote("Busy, try again in a minute");
+      } else {
+        setDraftState("failed");
+        setDraftNote(data.error || `Draft failed (${r.status})`);
+      }
+    } catch {
+      setDraftState("failed");
+      setDraftNote("Network error");
     }
   }
 
@@ -227,6 +284,7 @@ export function PolicyItemCard({ item }: { item: PolicyItem }) {
           style={{
             display: "flex",
             alignItems: "center",
+            flexWrap: "wrap",
             gap: 6,
             marginTop: 4,
             paddingTop: 10,
@@ -263,6 +321,52 @@ export function PolicyItemCard({ item }: { item: PolicyItem }) {
               Hidden on next load
             </span>
           )}
+          <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+            {draftNote && (
+              <span style={{ fontSize: 11, color: "var(--color-text-subtle)" }}>{draftNote}</span>
+            )}
+            {draftState === "ready" && draftId !== null ? (
+              <a
+                href={`/drafts?highlight=${draftId}`}
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  padding: "5px 10px",
+                  borderRadius: 8,
+                  border: "1px solid var(--color-primary)",
+                  color: "var(--color-primary)",
+                  textDecoration: "none",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                View draft
+              </a>
+            ) : (
+              <button
+                title="Write a blog post draft from this item"
+                disabled={draftState === "drafting"}
+                onClick={startDraft}
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  padding: "5px 10px",
+                  borderRadius: 8,
+                  cursor: draftState === "drafting" ? "default" : "pointer",
+                  border: "1px solid var(--color-border)",
+                  background: "#fff",
+                  color: "var(--color-text)",
+                  opacity: draftState === "drafting" ? 0.7 : 1,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {draftState === "drafting"
+                  ? "Drafting\u2026"
+                  : draftState === "failed"
+                    ? "Retry draft"
+                    : "Draft blog post"}
+              </button>
+            )}
+          </span>
         </div>
       </div>
     </article>

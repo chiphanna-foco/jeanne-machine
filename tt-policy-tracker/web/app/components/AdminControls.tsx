@@ -1,7 +1,55 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getStoredPassword } from "./PasswordGate";
+
+// Site access is Google sign-in (middleware.ts). Admin actions still need
+// ADMIN_TOKEN, which the Railway /admin/* endpoints check via ?token=. It is
+// asked for once, the first time the admin panel is opened, and kept in this
+// browser only. The old site password (jm_site_password) was the same token,
+// so it is picked up if present.
+const ADMIN_TOKEN_KEY = "jm_admin_token";
+const LEGACY_PASSWORD_KEY = "jm_site_password";
+
+function readAdminToken(): string {
+  try {
+    return (
+      window.localStorage.getItem(ADMIN_TOKEN_KEY) ||
+      window.localStorage.getItem(LEGACY_PASSWORD_KEY) ||
+      ""
+    );
+  } catch {
+    return "";
+  }
+}
+
+function ensureAdminToken(): string {
+  let token = readAdminToken();
+  if (!token) {
+    token = (window.prompt("Admin token (ADMIN_TOKEN) for admin actions:") || "").trim();
+    if (token) {
+      try {
+        window.localStorage.setItem(ADMIN_TOKEN_KEY, token);
+      } catch {
+        // storage blocked: token lives for this action only
+      }
+    }
+  }
+  return token;
+}
+
+function clearAdminToken() {
+  try {
+    window.localStorage.removeItem(ADMIN_TOKEN_KEY);
+    window.localStorage.removeItem(LEGACY_PASSWORD_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+// All API calls go through the authenticated Vercel proxy.
+function backend(path: string): string {
+  return `/backend${path}`;
+}
 
 interface PipelineStatus {
   running: boolean;
@@ -189,7 +237,7 @@ export function AdminControls() {
 
   const fetchStatus = async () => {
     try {
-      const resp = await fetch(appendToken("/admin/pipeline-status", getStoredPassword()));
+      const resp = await fetch(backend(appendToken("/admin/pipeline-status", readAdminToken())));
       if (resp.ok) {
         const data = await resp.json();
         setStatus(data);
@@ -201,7 +249,7 @@ export function AdminControls() {
 
   const fetchDbStats = async () => {
     try {
-      const resp = await fetch(appendToken("/admin/db-stats", getStoredPassword()));
+      const resp = await fetch(backend(appendToken("/admin/db-stats", readAdminToken())));
       if (resp.ok) {
         setDbStats(await resp.json());
       }
@@ -223,10 +271,15 @@ export function AdminControls() {
 
   const trigger = async (action: Action) => {
     if (action.confirmText && !confirm(action.confirmText)) return;
+    const token = ensureAdminToken();
+    if (!token) {
+      setMessage(`${action.label}: an admin token is needed for this action.`);
+      return;
+    }
     setBusy(true);
     setMessage(null);
     try {
-      const resp = await fetch(appendToken(action.path, getStoredPassword()));
+      const resp = await fetch(backend(appendToken(action.path, token)));
       const data = await resp.json();
       if (resp.ok) {
         if (action.view) {
@@ -235,7 +288,8 @@ export function AdminControls() {
           setMessage(`${action.label}: ${data.message || "Started"}`);
         }
       } else if (resp.status === 403) {
-        setMessage(`Auth rejected. Reload the page and re-enter the password.`);
+        clearAdminToken();
+        setMessage(`Admin token rejected. Click the action again to enter it.`);
       } else {
         setMessage(`${action.label} failed: ${data.error || resp.statusText}`);
       }
@@ -251,7 +305,10 @@ export function AdminControls() {
   if (!open) {
     return (
       <button
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          ensureAdminToken();
+          setOpen(true);
+        }}
         aria-label="Open admin controls"
         style={{
           position: "fixed",

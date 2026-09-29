@@ -1,20 +1,8 @@
 import type { NextConfig } from "next";
 
-const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
-const nextConfig: NextConfig = {
-  async rewrites() {
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${apiUrl}/api/:path*`,
-      },
-      {
-        source: "/admin/:path*",
-        destination: `${apiUrl}/admin/:path*`,
-      },
-    ];
-  },
-};
+// No rewrites. The browser reaches the Railway API only through the
+// authenticated route handler at app/backend/[...path]/route.ts, which adds
+// the X-Jeanne-Key header server-side. /api/auth/* belongs to Auth.js.
+const nextConfig: NextConfig = {};
 
 export default nextConfig;

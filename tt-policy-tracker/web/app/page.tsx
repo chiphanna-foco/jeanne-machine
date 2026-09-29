@@ -83,7 +83,7 @@ export default function Dashboard() {
 
     setLoading(true);
     setError(null);
-    fetch(`/api/items?${params}`)
+    fetch(`/backend/api/items?${params}`)
       .then((r) => {
         if (!r.ok) throw new Error(`API returned ${r.status}`);
         return r.json();
@@ -94,7 +94,7 @@ export default function Dashboard() {
       })
       .catch((err) => {
         console.error("Failed to fetch items:", err);
-        setError("Could not connect to the API. Check that NEXT_PUBLIC_API_URL is configured.");
+        setError("Could not connect to the API. Check that API_URL and JEANNE_API_KEY are set on Vercel.");
         setItems([]);
         setTotal(0);
       })

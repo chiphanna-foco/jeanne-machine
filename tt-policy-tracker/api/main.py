@@ -96,6 +96,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from api.routes_items_drafts import install_api_key_guard, router as items_drafts_router  # noqa: E402
+
+install_api_key_guard(app)  # X-Jeanne-Key on /api/*; /health and /admin/* unchanged
+app.include_router(items_drafts_router)
+
 
 # ── Health ──────────────────────────────────────────────────────────
 
@@ -125,21 +130,6 @@ async def root():
         "dashboard": "https://jeanne-machine.vercel.app",
         "docs": "/docs",
     }
-
-
-# ── Auth verification ──────────────────────────────────────────────
-
-
-@app.get("/api/auth/verify")
-async def verify_auth(token: str | None = None):
-    """Verify a password/token matches ADMIN_TOKEN.
-
-    If no ADMIN_TOKEN is configured on the server, anything passes (dev mode).
-    Returns: {"valid": true/false, "auth_required": true/false}
-    """
-    if not settings.admin_token:
-        return {"valid": True, "auth_required": False}
-    return {"valid": token == settings.admin_token, "auth_required": True}
 
 
 # ── Policy Items ────────────────────────────────────────────────────
