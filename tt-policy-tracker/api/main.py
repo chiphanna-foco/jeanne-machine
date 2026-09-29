@@ -547,13 +547,41 @@ _pipeline_status = {"running": False, "last_run": None, "last_result": None}
 _last_runs: dict[str, dict] = {}
 
 
-def _record_run(kind: str | None, run_token: str | None, running: bool, results: dict | None):
+_run_seq = 0
+
+
+def _start_run(kind: str | None, run_token: str | None = None) -> str | None:
+    """Claim the `kind` record for a new run. Returns the run's token."""
+    global _run_seq
     if not kind:
+        return run_token
+    if run_token is None:
+        _run_seq += 1
+        run_token = f"{datetime.utcnow().isoformat()}#{_run_seq}"
+    _last_runs[kind] = {
+        "run_token": run_token,
+        "running": True,
+        "finished_at": None,
+        "result": None,
+    }
+    return run_token
+
+
+def _finish_run(kind: str | None, run_token: str | None, results: dict) -> None:
+    """Store a run's result, but only if the record still belongs to that run.
+
+    A slow older task must not overwrite a newer run's record.
+    """
+    if not kind:
+        return
+    current = _last_runs.get(kind)
+    if current is None or current.get("run_token") != run_token:
+        logger.warning(f"Run record for {kind} belongs to a newer run; not overwriting")
         return
     _last_runs[kind] = {
         "run_token": run_token,
-        "running": running,
-        "finished_at": None if running else datetime.utcnow().isoformat(),
+        "running": False,
+        "finished_at": datetime.utcnow().isoformat(),
         "result": results,
     }
 
@@ -566,18 +594,32 @@ async def pipeline_status(token: str | None = Query(default=None)):
 
 
 async def _enrich_queue(
-    raw_ids: list[int], results: dict, new_item_ids: list[int] | None = None
+    raw_ids: list[int],
+    results: dict,
+    new_item_ids: list[int] | None = None,
+    time_budget_minutes: float | None = None,
 ) -> None:
     """Enrich each queued doc in its own session, counting outcomes in `results`.
 
     `results` must carry enrichment.pipeline.new_run_counters() keys. Stops
-    early (docs stay queued for the next run) when the Claude API is down.
+    early (docs stay queued for the next run) when the Claude API is down,
+    or when `time_budget_minutes` runs out.
     """
+    import time
+
     from enrichment.pipeline import api_should_stop, enrich_counted
 
+    deadline = time.monotonic() + time_budget_minutes * 60 if time_budget_minutes else None
     results["queued"] += len(raw_ids)
     for raw_id in raw_ids:
         if api_should_stop(results):
+            break
+        if deadline is not None and time.monotonic() > deadline:
+            results["stopped_for_time"] = True
+            logger.warning(
+                f"Enrichment time budget ({time_budget_minutes} min) used; "
+                "the rest stay queued for the next run"
+            )
             break
         try:
             async with async_session() as session:
@@ -767,7 +809,8 @@ async def _run_pipeline_task(
     """Background task: ingest from all adapters, then enrich."""
     global _pipeline_status
     _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
-    _record_run(run_kind, run_token, True, None)
+    if run_token is None:  # cron-daily already claimed its record
+        run_token = _start_run(run_kind)
 
     from enrichment.pipeline import new_run_counters
 
@@ -881,8 +924,17 @@ async def _run_pipeline_task(
             result = await session.execute(query)
             raw_ids = list(result.scalars().all())
 
-        # Then enrich each doc in its own session — one failure won't kill the batch
-        await _enrich_queue(raw_ids, results, new_item_ids)
+        # Then enrich each doc in its own session — one failure won't kill the batch.
+        # The daily run gets a time budget so it finishes inside the
+        # workflow's 150-minute verify window.
+        await _enrich_queue(
+            raw_ids,
+            results,
+            new_item_ids,
+            time_budget_minutes=settings.daily_enrich_time_budget_minutes
+            if run_kind == "daily"
+            else None,
+        )
 
         # ── Step 3: Slack push — act-now items only, capped, compact ──
         if new_item_ids and settings.slack_webhook_url:
@@ -897,7 +949,7 @@ async def _run_pipeline_task(
         "last_run": datetime.utcnow().isoformat(),
         "last_result": results,
     }
-    _record_run(run_kind, run_token, False, results)
+    _finish_run(run_kind, run_token, results)
 
 
 @app.get("/admin/run-enrich")
@@ -1976,8 +2028,7 @@ async def cron_daily(token: str | None = Query(default=None)):
 
     # run_token lets the workflow's verify step find THIS run's record in
     # /admin/pipeline-status -> last_by_kind.daily, not yesterday's.
-    run_token = datetime.utcnow().isoformat()
-    _record_run("daily", run_token, True, None)
+    run_token = _start_run("daily")
     asyncio.create_task(
         _run_pipeline_task(days_back=3, batch_size=300, run_kind="daily", run_token=run_token)
     )
@@ -1999,7 +2050,7 @@ async def _run_search_sweep_task():
     """
     global _pipeline_status
     _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
-    _record_run("search", None, True, None)
+    run_token = _start_run("search")
     from enrichment.pipeline import new_run_counters
 
     results = {"ingested": 0, "enriched": 0, **new_run_counters(), "errors": []}
@@ -2021,7 +2072,7 @@ async def _run_search_sweep_task():
                 "last_run": datetime.utcnow().isoformat(),
                 "last_result": results,
             }
-            _record_run("search", None, False, results)
+            _finish_run("search", run_token, results)
             return
         adapter = LegiScanSearchAdapter(seen_change_hashes=ls_seen, budget_remaining=ls_budget)
         try:
@@ -2056,7 +2107,7 @@ async def _run_search_sweep_task():
         "last_run": datetime.utcnow().isoformat(),
         "last_result": results,
     }
-    _record_run("search", None, False, results)
+    _finish_run("search", run_token, results)
 
 
 @app.get("/admin/cron-search")
@@ -2997,7 +3048,7 @@ async def _run_weekly_full_task():
     global _pipeline_status
     _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
 
-    _record_run("weekly_full", None, True, None)
+    run_token = _start_run("weekly_full")
     from enrichment.pipeline import new_run_counters
 
     results = {
@@ -3122,7 +3173,7 @@ async def _run_weekly_full_task():
         "last_run": datetime.utcnow().isoformat(),
         "last_result": results,
     }
-    _record_run("weekly_full", None, False, results)
+    _finish_run("weekly_full", run_token, results)
 
 
 # ── Content Drafts ─────────────────────────────────────────────────

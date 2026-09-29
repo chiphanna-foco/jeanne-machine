@@ -58,7 +58,11 @@ async def create_message(**kwargs):
     EnrichmentAPIError. Exceptions are caught most specific first.
     """
     check_api_key()
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    client = anthropic.AsyncAnthropic(
+        api_key=settings.anthropic_api_key,
+        timeout=settings.anthropic_timeout_seconds,
+        max_retries=settings.anthropic_max_retries,
+    )
     try:
         return await client.messages.create(**kwargs)
     except anthropic.AuthenticationError as e:
