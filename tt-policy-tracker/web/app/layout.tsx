@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
-import { PasswordGate } from "./components/PasswordGate";
 import { SiteFooter } from "./components/SiteFooter";
+import { UserBar } from "./components/UserBar";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -8,6 +8,7 @@ export const metadata: Metadata = {
   description: "She reads every rental housing law in America so you don't have to.",
 };
 
+// Access is enforced by middleware.ts (Google sign-in, turbotenant.com only).
 export default function RootLayout({
   children,
 }: {
@@ -15,11 +16,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>
-        <PasswordGate>
-          {children}
-          <SiteFooter />
-        </PasswordGate>
+      <body style={{ position: "relative" }}>
+        <UserBar />
+        {children}
+        <SiteFooter />
       </body>
     </html>
   );

@@ -88,6 +88,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from api.routes_items_drafts import install_api_key_guard, router as items_drafts_router  # noqa: E402
+
+install_api_key_guard(app)  # X-Jeanne-Key on /api/*; /health and /admin/* unchanged
+app.include_router(items_drafts_router)
+
 
 # ── Health ──────────────────────────────────────────────────────────
 

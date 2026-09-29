@@ -19,7 +19,7 @@ export default function StatesPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/states")
+    fetch("/backend/api/states")
       .then((r) => {
         if (!r.ok) throw new Error(`API returned ${r.status}`);
         return r.json();

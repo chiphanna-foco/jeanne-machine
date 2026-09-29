@@ -46,7 +46,7 @@ export default function LawsPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/laws/matrix")
+    fetch("/backend/api/laws/matrix")
       .then((r) => {
         if (!r.ok) throw new Error(`API returned ${r.status}`);
         return r.json();
@@ -61,7 +61,7 @@ export default function LawsPage() {
 
   const openSnapshot = async (snapshotId: number) => {
     try {
-      const resp = await fetch("/api/laws");
+      const resp = await fetch("/backend/api/laws");
       const data = await resp.json();
       const snap = data.snapshots.find((s: LawSnapshot) => s.id === snapshotId);
       if (snap) setSelected(snap);

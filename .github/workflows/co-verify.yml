@@ -27,6 +27,8 @@ jobs:
         env:
           BASE: ${{ secrets.API_BASE_URL }}
           TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          # /api/* on Railway needs X-Jeanne-Key (repo secret JEANNE_API_KEY).
+          JEANNE_API_KEY: ${{ secrets.JEANNE_API_KEY }}
         run: |
           set -uo pipefail
           base="${BASE%/}"
@@ -34,7 +36,7 @@ jobs:
           call () { # $1 = path+query (no token); echoes response body
             local p="$1" sep
             case "$p" in *\?*) sep="&";; *) sep="?";; esac
-            curl -sS --max-time 290 "$base/${p}${sep}token=${TOKEN}"
+            curl -sS --max-time 290 -H "X-Jeanne-Key: ${JEANNE_API_KEY:-}" "$base/${p}${sep}token=${TOKEN}"
           }
 
           wait_idle () { # poll pipeline-status until running=false (or timeout)

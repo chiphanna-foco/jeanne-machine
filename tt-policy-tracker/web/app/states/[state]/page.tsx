@@ -63,7 +63,7 @@ export default function StateGuidePage() {
   useEffect(() => {
     if (!code) return;
     setLoading(true);
-    fetch(`/api/states/${code}`)
+    fetch(`/backend/api/states/${code}`)
       .then((r) => {
         if (!r.ok) throw new Error(`API returned ${r.status}`);
         return r.json();
