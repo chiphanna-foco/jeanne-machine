@@ -81,6 +81,10 @@ async def create_message(**kwargs):
         raise EnrichmentAPIError("sdk", type(e).__name__) from e
 
 
+# Stop reasons that mean the answer is missing or cut off.
+FAILED_STOP_REASONS = {"max_tokens", "refusal"}
+
+
 def response_text(response) -> str:
     """Text of a response, markdown fences stripped. Reads only text blocks."""
     raw = "".join(
@@ -99,15 +103,25 @@ async def create_json(label: str, **kwargs) -> dict:
     more call. A second failure raises EnrichmentParseError. API failures
     raise EnrichmentAPIError at once and are never retried here.
     """
+    last_problem = ""
     for attempt in (1, 2):
         response = await create_message(**kwargs)
+        stop_reason = getattr(response, "stop_reason", None)
+        if stop_reason in FAILED_STOP_REASONS:
+            # A cut-off or declined answer is bad output, not an API outage:
+            # retry once, then consume the doc and count a parse error.
+            logger.warning(f"{label}: stop_reason={stop_reason} (attempt {attempt}/2)")
+            last_problem = f"stop_reason={stop_reason}"
+            continue
         raw = response_text(response)
         try:
             result = json.loads(raw)
         except json.JSONDecodeError as e:
             logger.warning(f"{label}: unparseable model output (attempt {attempt}/2): {e}")
+            last_problem = "unparseable JSON"
             continue
         if isinstance(result, dict):
             return result
         logger.warning(f"{label}: model output is not a JSON object (attempt {attempt}/2)")
-    raise EnrichmentParseError(f"{label}: model output unparseable after 2 attempts")
+        last_problem = "not a JSON object"
+    raise EnrichmentParseError(f"{label}: no usable output after 2 attempts ({last_problem})")

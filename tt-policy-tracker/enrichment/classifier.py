@@ -38,14 +38,17 @@ ORIENTATION — this is a legal-compliance feed, so err toward RECALL:
 
 Still NOT relevant: budget line items and appropriations; homeowner/HOA-only or mortgage/foreclosure-only matters; homelessness services with no landlord obligations; zoning or construction rules with no impact on operating a rental; documents that merely mention "housing" or "residents" in passing without changing any rental rule.
 
+Funding-only bills: set "funding_only" to true when the bill only appropriates or funds money and does not change landlord or tenant obligations. A rental-assistance appropriation or a housing-program budget line is funding_only. A budget bill that also changes a landlord or tenant rule is NOT funding_only. A funding_only bill is not relevant.
+
 Respond with ONLY valid JSON (no markdown):
-{"relevant": true/false, "topics": ["topic_1", "topic_2"], "confidence": 0.0-1.0}"""
+{"relevant": true/false, "funding_only": true/false, "topics": ["topic_1", "topic_2"], "confidence": 0.0-1.0}"""
 
 
 async def classify_document(text: str, max_chars: int = 8000) -> dict:
     """Classify a document for relevance to rental housing topics.
 
-    Returns: {"relevant": bool, "topics": list[str], "confidence": float}
+    Returns: {"relevant": bool, "funding_only": bool, "topics": list[str],
+    "confidence": float}. funding_only blocks only the subject-tag rescue.
 
     Raises EnrichmentAPIError when the API gives no answer, and
     EnrichmentParseError when the answer is unparseable twice. It never
@@ -68,8 +71,11 @@ async def classify_document(text: str, max_chars: int = 8000) -> dict:
         ],
     )
 
+    # funding_only does not override the model's own relevant verdict; the
+    # pipeline uses it only to stop the housing subject-tag rescue.
     return {
         "relevant": bool(result.get("relevant", False)),
+        "funding_only": bool(result.get("funding_only", False)),
         "topics": result.get("topics", []),
         "confidence": float(result.get("confidence", 0.0)),
     }

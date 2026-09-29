@@ -102,9 +102,25 @@ class Settings(BaseSettings):
     digest_recipient: str = "chip.hanna@gmail.com"
     digest_from_email: str = "policy-tracker@turbotenant.com"
 
-    # AI models
+    # AI models. Each stage has its own setting, so an env var (e.g.
+    # LAW_SYNTH_MODEL) can move one stage without moving the others.
     classifier_model: str = "claude-haiku-4-5-20251001"
-    summarizer_model: str = "claude-sonnet-4-6"
+    # Sonnet 5.5: thinking is ON by default. `between_tools` turns it off
+    # (allowed only at effort high or lower); `disabled` and budget_tokens
+    # return 400, and so does any non-default temperature/top_p/top_k.
+    summarizer_model: str = "claude-sonnet-5-5"
+    summarizer_effort: str = "medium"
+    # Was 600. Raised so the JSON answer cannot be cut short.
+    summarizer_max_tokens: int = 2000
+    # Opus 5.5: thinking cannot be disabled; effort is the only control
+    # (default medium). Thinking tokens bill as output and count against
+    # max_tokens, so max_tokens is set well above the visible answer size.
+    law_synth_model: str = "claude-opus-5-5"
+    law_synth_effort: str = "high"
+    law_synth_max_tokens: int = 16000
+    drafter_model: str = "claude-opus-5-5"
+    drafter_effort: str = "high"
+    drafter_max_tokens: int = 16000
 
     # Enrichment thresholds
     relevance_confidence_threshold: float = 0.6
