@@ -15,7 +15,7 @@ from config import settings
 from enrichment.claude_client import EnrichmentAPIError, EnrichmentParseError
 from enrichment.classifier import classify_document
 from enrichment.geotagger import geotag_from_adapter
-from enrichment.keywords import has_housing_subject_tag
+from enrichment.keywords import has_housing_subject_tag, is_funding_bill_title
 from enrichment.summarizer import summarize_document
 from storage.models import (
     Jurisdiction,
@@ -126,7 +126,13 @@ async def enrich_document(session: AsyncSession, raw: RawDocument) -> PolicyItem
     # (e.g. LegiScan "Subjects: Housing") is high-precision relevant even when
     # its summary is too thin for the strict classifier — this is what was
     # silently dropping CO HB26-1196 "Tenant Data Information". Trust the tag.
-    strong_subject = has_housing_subject_tag(text)
+    # Funding bills: a housing subject tag is common on appropriation bills
+    # that change no landlord rule, so the tag must not rescue them. Either
+    # the classifier's funding_only verdict or the title backstop blocks it.
+    funding = classification.get("funding_only", False) or is_funding_bill_title(text)
+    strong_subject = has_housing_subject_tag(text) and not funding
+    if funding:
+        logger.info(f"Funding-only bill: {raw.external_id}")
     relevant = classification["relevant"] or strong_subject
     passes_confidence = (
         classification["confidence"] >= settings.relevance_confidence_threshold

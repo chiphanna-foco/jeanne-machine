@@ -244,7 +244,8 @@ async def test_health_reports_sha_models_and_key_presence(monkeypatch):
     assert body["git_sha"] == "abc123"
     assert body["classifier_model"] == settings.classifier_model
     assert body["summarizer_model"] == settings.summarizer_model
-    assert "synthesizer_model" in body
+    assert body["synthesizer_model"] == settings.law_synth_model == "claude-opus-5-5"
+    assert body["drafter_model"] == settings.drafter_model == "claude-opus-5-5"
     assert body["anthropic_key_configured"] is True
     assert "secret-value" not in json.dumps(body)
 

@@ -98,3 +98,28 @@ def has_housing_subject_tag(text: str) -> bool:
         return False
     line = m.group(1).lower()
     return any(s in line for s in HOUSING_SUBJECTS)
+
+
+# Keyword backstop for funding bills. Matched against the title line only,
+# where appropriation and budget bills name themselves. A body that merely
+# mentions "appropriation" is not enough.
+_FUNDING_TITLE_RE = re.compile(
+    r"\b(?:"
+    r"(?:general|supplemental|omnibus|deficiency)\s+appropriations?"
+    r"|making\s+(?:supplemental\s+)?appropriations"
+    r"|appropriations?\s+(?:act|bill)"
+    r"|budget\s+act"
+    r"|capital\s+budget"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_funding_bill_title(text: str) -> bool:
+    """True when the doc's first line names it an appropriation or budget bill.
+
+    Used so a housing subject tag alone cannot pull a funding bill into the
+    feed. It does not override the classifier's own relevant verdict.
+    """
+    first_line = (text or "").strip().split("\n", 1)[0][:300]
+    return bool(_FUNDING_TITLE_RE.search(first_line))

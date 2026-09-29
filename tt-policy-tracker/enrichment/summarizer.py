@@ -57,7 +57,13 @@ async def summarize_document(text: str, max_chars: int = 15000) -> dict:
     result = await create_json(
         "summarizer",
         model=settings.summarizer_model,
-        max_tokens=600,
+        # Was 600: long answers were cut off at max_tokens and dropped as
+        # unparseable (daily run 36631928623, one doc).
+        max_tokens=settings.summarizer_max_tokens,
+        # Sonnet 5.5 thinks by default; between_tools turns it off for this
+        # single-shot JSON call. No other field may sit beside it.
+        thinking={"type": "between_tools"},
+        output_config={"effort": settings.summarizer_effort},
         system=SUMMARIZER_SYSTEM_PROMPT,
         messages=[
             {

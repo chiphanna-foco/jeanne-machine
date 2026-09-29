@@ -116,8 +116,8 @@ async def health():
         "git_sha": os.environ.get("RAILWAY_GIT_COMMIT_SHA") or "unknown",
         "classifier_model": settings.classifier_model,
         "summarizer_model": settings.summarizer_model,
-        # The synthesizer and drafter share the summarizer model today.
-        "synthesizer_model": settings.summarizer_model,
+        "synthesizer_model": settings.law_synth_model,
+        "drafter_model": settings.drafter_model,
         "anthropic_key_configured": bool(settings.anthropic_api_key),
     }
 
@@ -3104,13 +3104,16 @@ async def _run_weekly_full_task():
         try:
             from enrichment.law_synthesizer import (
                 find_jurisdiction_topic_pairs_with_items,
+                select_pairs_for_refresh,
                 synthesize_law_snapshot,
             )
 
             async with async_session() as session:
                 pairs = await find_jurisdiction_topic_pairs_with_items(session, min_items=1)
+                # Pairs with new items first, oldest snapshot first, capped at 50.
+                pairs = await select_pairs_for_refresh(session, pairs, 50)
 
-            for jur_id, topic, items in pairs[:50]:
+            for jur_id, topic, items in pairs:
                 try:
                     async with async_session() as session:
                         snap = await synthesize_law_snapshot(session, jur_id, topic, items)
