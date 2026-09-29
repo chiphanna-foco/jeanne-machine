@@ -115,6 +115,8 @@ router = APIRouter()
 # duplicate jobs. In-process only: Railway runs one uvicorn process today. The
 # unique constraint on content_draft.policy_item_id is the hard backstop.
 _drafting: set[int] = set()
+# Most draft jobs allowed at once (each is one Anthropic call).
+MAX_CONCURRENT_DRAFTS = 3
 _last_error: dict[int, str] = {}
 
 
@@ -180,21 +182,39 @@ async def create_item_draft(
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ):
-    """Start a blog draft for one item. 202 if started, 200 if one exists."""
-    existing = await _find_draft(session, item_id)
-    if existing is not None:
-        return _existing_response(existing)
-
+    """Start a blog draft for one item. 202 if started, 200 if one exists,
+    429 if MAX_CONCURRENT_DRAFTS jobs are already running."""
+    # Claim the item BEFORE any await, so two concurrent requests cannot both
+    # pass the check. Released in `finally` unless a job was handed off (the
+    # job releases it when it ends).
     if item_id in _drafting:
         return JSONResponse(status_code=202, content={"status": "drafting", "item_id": item_id})
-
-    if await _get_item(session, item_id) is None:
-        return JSONResponse(status_code=404, content={"error": "item not found"})
-
+    if len(_drafting) >= MAX_CONCURRENT_DRAFTS:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "status": "busy",
+                "error": f"{MAX_CONCURRENT_DRAFTS} drafts are already being written. "
+                "Try again in a minute.",
+            },
+        )
     _drafting.add(item_id)
-    _last_error.pop(item_id, None)
-    background_tasks.add_task(_run_blog_draft, item_id)
-    return JSONResponse(status_code=202, content={"status": "drafting", "item_id": item_id})
+    handed_off = False
+    try:
+        existing = await _find_draft(session, item_id)
+        if existing is not None:
+            return _existing_response(existing)
+
+        if await _get_item(session, item_id) is None:
+            return JSONResponse(status_code=404, content={"error": "item not found"})
+
+        _last_error.pop(item_id, None)
+        background_tasks.add_task(_run_blog_draft, item_id)
+        handed_off = True
+        return JSONResponse(status_code=202, content={"status": "drafting", "item_id": item_id})
+    finally:
+        if not handed_off:
+            _drafting.discard(item_id)
 
 
 @router.get("/api/items/{item_id}/drafts")

@@ -168,6 +168,54 @@ def test_existing_social_draft_is_returned_not_duplicated(client, store):
     assert store.drafter_calls == 0
 
 
-def test_unknown_item_404(client, store):
+def test_unknown_item_404_releases_claim(client, store):
     r = client.post("/api/items/999/drafts", headers={"X-Jeanne-Key": KEY})
     assert r.status_code == 404
+    assert 999 not in rid._drafting
+
+
+def test_error_before_handoff_releases_claim(client, store, monkeypatch):
+    async def boom(_session, _item_id):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(rid, "_find_draft", boom)
+    c = TestClient(app, raise_server_exceptions=False)
+    r = c.post("/api/items/7/drafts", headers={"X-Jeanne-Key": KEY})
+    assert r.status_code == 500
+    assert 7 not in rid._drafting
+
+
+async def test_concurrent_posts_start_one_drafter(monkeypatch, store):
+    import asyncio
+
+    import httpx
+
+    monkeypatch.setenv("JEANNE_API_KEY", KEY)
+    started = []
+
+    async def slow_find(_session, _item_id):
+        await asyncio.sleep(0.05)  # yield so both requests interleave here
+        return None
+
+    async def job(item_id):
+        started.append(item_id)
+
+    monkeypatch.setattr(rid, "_find_draft", slow_find)
+    monkeypatch.setattr(rid, "_run_blog_draft", job)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as ac:
+        h = {"X-Jeanne-Key": KEY}
+        r1, r2 = await asyncio.gather(
+            ac.post("/api/items/7/drafts", headers=h),
+            ac.post("/api/items/7/drafts", headers=h),
+        )
+    assert sorted([r1.status_code, r2.status_code]) == [202, 202]
+    assert started == [7]
+
+
+def test_cap_returns_429(client, store):
+    rid._drafting.update({101, 102, 103})
+    r = client.post("/api/items/7/drafts", headers={"X-Jeanne-Key": KEY})
+    assert r.status_code == 429
+    assert "Try again in a minute" in r.json()["error"]
+    assert 7 not in rid._drafting

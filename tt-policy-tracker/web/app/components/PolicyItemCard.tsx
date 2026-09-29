@@ -107,6 +107,9 @@ export function PolicyItemCard({ item }: { item: PolicyItem }) {
         setDraftState("ready");
       } else if (r.status === 202) {
         setTimeout(() => pollDraft(0), 3000);
+      } else if (r.status === 429) {
+        setDraftState("failed");
+        setDraftNote("Busy, try again in a minute");
       } else {
         setDraftState("failed");
         setDraftNote(data.error || `Draft failed (${r.status})`);

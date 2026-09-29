@@ -1,12 +1,6 @@
 import { redirect } from "next/navigation";
 import { auth, signIn } from "@/auth";
-import { DENIAL_MESSAGE, isAllowedSessionEmail } from "@/lib/allowed-email";
-
-function safeCallback(raw: unknown): string {
-  // Only same-site relative paths; never "//host" or absolute URLs.
-  if (typeof raw !== "string" || !raw.startsWith("/") || raw.startsWith("//")) return "/";
-  return raw;
-}
+import { DENIAL_MESSAGE, isAllowedSessionEmail, safeCallback } from "@/lib/allowed-email";
 
 export default async function SignInPage({
   searchParams,
