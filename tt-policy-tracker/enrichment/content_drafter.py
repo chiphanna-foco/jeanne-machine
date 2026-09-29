@@ -109,6 +109,9 @@ async def _generate_draft(
         model=settings.drafter_model,
         max_tokens=settings.drafter_max_tokens,
         output_config={"effort": settings.drafter_effort},
+        # Opus at effort high can think for minutes; the client-wide 120 s
+        # is sized for Haiku and Sonnet.
+        timeout=600,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
     )

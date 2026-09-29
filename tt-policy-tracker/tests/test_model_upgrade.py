@@ -188,7 +188,9 @@ def test_citations_not_in_input_are_removed_and_flagged():
     out, removed = strip_unsupported_citations(result, source)
 
     assert out["statutory_references"] == ["C.R.S. § 38-12-103", "42 U.S.C. § 3604(b)"]
-    assert out["key_facts"] == ["Return within 30 days (§ 38-12-103)"]
+    assert out["key_facts"][0] == "Return within 30 days (§ 38-12-103)"
+    # Only the citation text goes; the rest of the fact stays.
+    assert out["key_facts"][1] == "Cal. Civ. [citation removed: not in source items] differs"
     assert "13-40-104" not in out["summary"]
     assert "[citation removed" in out["summary"]
     assert out["headline"] == "Deposits capped under § 38-12-103"
@@ -237,12 +239,33 @@ def test_pairs_with_new_items_first_then_oldest_snapshot():
 # ── Funding-only bills ─────────────────────────────────────────────
 
 
-async def test_funding_only_is_never_relevant(monkeypatch):
-    _patch_client(monkeypatch, classifier, _reply(
-        {"relevant": True, "funding_only": True, "topics": ["landlord_tenant_law"], "confidence": 0.9}
-    ))
+async def test_funding_only_does_not_override_a_relevant_verdict(monkeypatch):
+    """relevant=true + funding_only=true is kept: the model's verdict stands."""
+    _patch_client(monkeypatch, classifier, [
+        _reply({"relevant": True, "funding_only": True, "topics": ["eviction"], "confidence": 0.9}),
+        _reply(SUMMARY),
+    ])
     result = await classifier.classify_document("HB 1: Rental assistance appropriation")
-    assert result["relevant"] is False and result["funding_only"] is True
+    assert result["relevant"] is True and result["funding_only"] is True
+
+    raw = RawDocument(id=1, external_id="x", raw_text="HB 1: Budget Act of 2026\nSubjects: Housing")
+    counters = new_run_counters()
+    _patch_client(monkeypatch, classifier, [
+        _reply({"relevant": True, "funding_only": True, "topics": ["eviction"], "confidence": 0.9}),
+        _reply(SUMMARY),
+    ])
+    item = await enrich_counted(_synth_session(), raw, counters)
+    assert item is not None and counters["relevant"] == 1
+
+
+async def test_funding_only_blocks_the_subject_tag_rescue(monkeypatch):
+    _patch_client(monkeypatch, classifier, _reply(
+        {"relevant": False, "funding_only": True, "topics": [], "confidence": 0.9}
+    ))
+    raw = RawDocument(id=1, external_id="x", raw_text="HB 7: Housing trust fund\nSubjects: Housing")
+    counters = new_run_counters()
+    item = await enrich_counted(_synth_session(), raw, counters)
+    assert item is None and counters["irrelevant"] == 1
 
 
 def test_classifier_prompt_asks_for_funding_only():
@@ -281,3 +304,118 @@ async def test_funding_title_blocks_the_housing_subject_override(monkeypatch):
 
     assert item is None
     summarize.assert_not_awaited()
+
+
+# ── Citation check edge cases (review fixes) ─────────────────────
+
+
+def test_year_after_code_name_is_not_a_citation():
+    from enrichment.law_synthesizer import unsupported_citations
+
+    assert unsupported_citations("Enacted in Session Laws 2024 and the Code 2023 update.", "") == []
+    assert unsupported_citations("Colo. Rev. Stat. 2024-1", "") != []  # not a bare year
+
+
+@pytest.mark.parametrize(
+    "text, source",
+    [
+        ("Under C.R.S. § 38\u201312\u2013103 deposits", "Amends C.R.S. § 38-12-103."),  # en dash out
+        ("Under C.R.S. § 38-12-103 deposits", "Amends C.R.S. § 38\u201412\u2014103."),  # em dash in
+    ],
+)
+def test_dashes_are_normalized_on_both_sides(text, source):
+    from enrichment.law_synthesizer import unsupported_citations
+
+    assert unsupported_citations(text, source) == []
+
+
+def test_section_numbers_must_match_as_whole_tokens():
+    from enrichment.law_synthesizer import unsupported_citations
+
+    source = "Amends C.R.S. § 38-12-108 and HB 8."
+    assert unsupported_citations("See § 8 for details", source) == ["§ 8"]
+    assert unsupported_citations("See § 12 for details", source) == ["§ 12"]
+    assert unsupported_citations("See § 38-12-108 for details", source) == []
+    assert unsupported_citations("See § 38-12-10 for details", source) == ["§ 38-12-10"]
+
+
+def test_key_fact_keeps_its_text_when_a_citation_is_stripped():
+    out, removed = strip_unsupported_citations(
+        {"key_facts": ["Deposit is due back in 30 days under § 99-1-1, per the bill."],
+         "statutory_references": [], "headline": "", "summary": "", "caveats": ""},
+        "Deposit returns within 30 days.",
+    )
+    assert out["key_facts"] == [
+        "Deposit is due back in 30 days under [citation removed: not in source items], per the bill."
+    ]
+    assert len(removed) == 1
+
+
+# ── Rotation: failed pairs go last (review fix) ──────────────────
+
+
+def test_failed_pair_drops_behind_pairs_that_have_not_failed(monkeypatch):
+    monkeypatch.setattr(law_synthesizer, "_failed_last_attempt", {(5, "eviction")})
+    items = {i: SimpleNamespace(id=i) for i in range(1, 4)}
+    now = datetime(2026, 9, 29)
+    pairs = [
+        (5, "eviction", [items[1]]),  # no snapshot, but failed last time
+        (6, "eviction", [items[2]]),  # fresh, nothing new
+    ]
+    snaps = {(6, "eviction"): SimpleNamespace(source_item_ids=[2], updated_at=now)}
+    assert [p[0] for p in order_pairs_for_refresh(pairs, snaps)] == [6, 5]
+
+
+async def test_synthesis_failure_is_remembered_and_cleared(monkeypatch):
+    monkeypatch.setattr(law_synthesizer, "_failed_last_attempt", set())
+    _patch_client(monkeypatch, law_synthesizer, _reply("{}", stop_reason="refusal"))
+    with pytest.raises(EnrichmentParseError):
+        await law_synthesizer.synthesize_law_snapshot(_synth_session(), 9, "eviction", [_item(1)])
+    assert (9, "eviction") in law_synthesizer._failed_last_attempt
+
+    _patch_client(monkeypatch, law_synthesizer, _reply(
+        {"headline": "h", "summary": "s", "key_facts": [], "statutory_references": [],
+         "confidence": "med", "caveats": ""}))
+    await law_synthesizer.synthesize_law_snapshot(_synth_session(), 9, "eviction", [_item(1)])
+    assert (9, "eviction") not in law_synthesizer._failed_last_attempt
+
+
+async def test_refresh_laws_uses_the_same_pair_selection(monkeypatch):
+    from api import main
+
+    class _Ctx:
+        async def __aenter__(self):
+            return _synth_session()
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(main, "async_session", lambda: _Ctx())
+    pairs = [(1, "eviction", [_item(1)]), (2, "eviction", [_item(2)])]
+    monkeypatch.setattr(law_synthesizer, "find_jurisdiction_topic_pairs_with_items",
+                        AsyncMock(return_value=pairs))
+    chosen = AsyncMock(return_value=[pairs[1]])
+    monkeypatch.setattr(law_synthesizer, "select_pairs_for_refresh", chosen)
+    synth = AsyncMock(return_value=None)
+    monkeypatch.setattr(law_synthesizer, "synthesize_law_snapshot", synth)
+
+    await main._run_refresh_laws_task(min_items=1, max_pairs=1)
+
+    assert chosen.await_args.args[1:] == (pairs, 1)
+    assert [c.args[1] for c in synth.await_args_list] == [2]
+
+
+@pytest.mark.parametrize("module, call", [
+    (law_synthesizer, lambda: law_synthesizer.synthesize_law_snapshot(
+        _synth_session(), 1, "eviction", [_item(1)])),
+    (content_drafter, lambda: content_drafter.generate_blog_draft(
+        _synth_session(), SimpleNamespace(id=3, title="t", summary="s", impact_score="high",
+                                          impact_reasoning="r", topic_tags=[], action_needed=None,
+                                          source_url=None))),
+])
+async def test_opus_calls_get_a_600_second_timeout(monkeypatch, module, call):
+    create = _patch_client(monkeypatch, module, _reply(
+        {"headline": "h", "summary": "s", "key_facts": [], "statutory_references": [],
+         "confidence": "med", "caveats": "", "title": "T", "body": "B"}))
+    await call()
+    assert create.await_args.kwargs["timeout"] == 600

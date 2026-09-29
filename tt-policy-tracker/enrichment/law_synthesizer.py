@@ -79,48 +79,90 @@ Confidence scale:
 # Statute-like references: section signs, U.S.C./C.F.R., state code names,
 # public laws. Each match ends in a section number; that number is what we
 # look for in the input. Bill numbers (HB 1234) are not citations of law and
-# are left alone.
+# are left alone, and a bare year after a code name ("Laws 2024") is not a
+# section number.
 _SECTION = r"\d[\w.:\-]*(?:\([\w.]+\))*"
+_NOT_A_YEAR = r"(?!(?:19|20)\d\d(?![\w.:\-]))"
 CITATION_RE = re.compile(
     r"(?:§§?\s*" + _SECTION
     + r"|\b\d+\s+(?:U\.?\s?S\.?\s?C|C\.?\s?F\.?\s?R)\.?\s*(?:§§?\s*)?" + _SECTION
     + r"|\b(?:Rev(?:ised)?\.?\s+Stat(?:utes)?|Gen(?:eral)?\.?\s+Stat(?:utes)?|Stat(?:utes)?\.?"
-    + r"|Code|Laws|RCW|ORS|ILCS|CRS|MCL|RSA)\.?\s*(?:Ann\.?\s*)?(?:§§?\s*)?" + _SECTION
-    + r"|\b(?:Public\s+Law|Pub\.\s*L\.)\s*(?:No\.\s*)?\d+[-\u2013]\d+)",
+    + r"|Code|Laws|RCW|ORS|ILCS|CRS|MCL|RSA)\.?\s*(?:Ann\.?\s*)?(?:§§?\s*)?"
+    + _NOT_A_YEAR + _SECTION
+    + r"|\b(?:Public\s+Law|Pub\.\s*L\.)\s*(?:No\.\s*)?\d+-\d+)",
     re.IGNORECASE,
 )
-_NUMBER_RE = re.compile(r"\d[\w.:\-\u2013]*(?:\([\w.]+\))*$")
+_NUMBER_RE = re.compile(r"\d[\w.:\-]*(?:\([\w.]+\))*$")
 UNSUPPORTED_MARK = "[citation removed: not in source items]"
+
+
+def _normalize(text: str) -> str:
+    """Lowercase, with en and em dashes turned into '-'."""
+    return (text or "").replace("\u2013", "-").replace("\u2014", "-").lower()
 
 
 def _citation_key(citation: str) -> str:
     """The section number at the end of a citation, e.g. '38-12-103'."""
     m = _NUMBER_RE.search(citation.strip().rstrip(".,;"))
-    return (m.group(0) if m else citation).rstrip(".").lower()
+    return (m.group(0) if m else citation).rstrip(".")
+
+
+def _has_token(source: str, number: str) -> bool:
+    """True when `number` appears in `source` as a whole token.
+
+    '§ 8' must not pass on the 8 in '38-12-108'.
+    """
+    pattern = r"(?<![\w.\-])" + re.escape(number) + r"(?![\w\-]|\.\w)"
+    return re.search(pattern, source) is not None
 
 
 def unsupported_citations(text: str, source: str) -> list[str]:
     """Citations in `text` whose section number does not appear in `source`."""
-    source_lower = source.lower()
+    source_n = _normalize(source)
+    source_keys = set()
+    for m in CITATION_RE.finditer(source_n):
+        k = _citation_key(m.group(0))
+        source_keys.update({k, k.split("(", 1)[0]})
     bad = []
-    for m in CITATION_RE.finditer(text or ""):
+    for m in CITATION_RE.finditer(_normalize(text)):
         key = _citation_key(m.group(0))
         # A subsection of a cited section counts: 3604(b) is fine if 3604 is there.
         base = key.split("(", 1)[0]
-        if key not in source_lower and base not in source_lower:
-            bad.append(m.group(0))
+        if key in source_keys or base in source_keys:
+            continue
+        # A multi-part number (38-12-103, 59.18.280) is specific enough to
+        # match anywhere in the source as a whole token. A bare number like
+        # 8 must match a citation in the source, not "HB 8".
+        if re.search(r"[.\-:]", base) and (
+            _has_token(source_n, key) or _has_token(source_n, base)
+        ):
+            continue
+        bad.append(m.group(0))
     return bad
+
+
+def _strip(text: str, source: str, removed: list[str]) -> str:
+    """Replace each unsupported citation in `text` with a visible marker."""
+    for bad in unsupported_citations(text, source):
+        removed.append(bad)
+        text = re.sub(re.escape(bad), UNSUPPORTED_MARK, _normalize_dashes(text),
+                      count=1, flags=re.IGNORECASE)
+    return text
+
+
+def _normalize_dashes(text: str) -> str:
+    return (text or "").replace("\u2013", "-").replace("\u2014", "-")
 
 
 def strip_unsupported_citations(result: dict, source: str) -> tuple[dict, list[str]]:
     """Remove citations the model did not get from the source items.
 
     Method: find statute-like references with CITATION_RE, and keep one only
-    if its section number appears verbatim in the prompt we sent. Then:
-      * statutory_references: unsupported entries are dropped.
-      * key_facts: a fact with an unsupported citation is dropped.
-      * headline / summary: the citation text is replaced with a visible
-        marker, since dropping the whole narrative would lose the snapshot.
+    if its section number appears as a whole token in the prompt we sent
+    (dashes normalized on both sides). Then:
+      * statutory_references: an unsupported entry is dropped.
+      * key_facts, headline, summary: only the citation text is replaced
+        with a visible marker; the rest of the sentence stays.
     Any removal adds a line to caveats, so the snapshot is flagged.
     """
     removed: list[str] = []
@@ -134,21 +176,11 @@ def strip_unsupported_citations(result: dict, source: str) -> tuple[dict, list[s
             refs.append(ref)
     result["statutory_references"] = refs
 
-    facts = []
-    for fact in result.get("key_facts") or []:
-        bad = unsupported_citations(str(fact), source)
-        if bad:
-            removed.extend(bad)
-        else:
-            facts.append(fact)
-    result["key_facts"] = facts
-
+    result["key_facts"] = [
+        _strip(str(fact), source, removed) for fact in result.get("key_facts") or []
+    ]
     for field in ("headline", "summary"):
-        text = str(result.get(field, "") or "")
-        for bad in unsupported_citations(text, source):
-            removed.append(bad)
-            text = text.replace(bad, UNSUPPORTED_MARK)
-        result[field] = text
+        result[field] = _strip(str(result.get(field, "") or ""), source, removed)
 
     if removed:
         note = (
@@ -160,13 +192,19 @@ def strip_unsupported_citations(result: dict, source: str) -> tuple[dict, list[s
     return result, removed
 
 
-async def synthesize_law_snapshot(
+# (jurisdiction_id, topic) pairs whose last synthesis attempt failed. In
+# memory: a redeploy clears it, which only means a failed pair gets one more
+# early try.
+_failed_last_attempt: set[tuple[int, str]] = set()
+
+
+async def _synthesize_law_snapshot(
     session: AsyncSession,
     jurisdiction_id: int,
     topic: str,
     items: list[PolicyItem],
 ) -> LawSnapshot | None:
-    """Synthesize or update a LawSnapshot for a (jurisdiction, topic) pair.
+    """Synthesize or update a LawSnapshot (see synthesize_law_snapshot).
 
     Raises EnrichmentAPIError / EnrichmentParseError instead of returning
     None, so the run counts the failure. The existing snapshot is untouched,
@@ -203,6 +241,9 @@ async def synthesize_law_snapshot(
         model=settings.law_synth_model,
         max_tokens=settings.law_synth_max_tokens,
         output_config={"effort": settings.law_synth_effort},
+        # Opus at effort high can think for minutes; the client-wide 120 s
+        # is sized for Haiku and Sonnet.
+        timeout=600,
         system=SYNTHESIZER_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -283,26 +324,51 @@ async def find_jurisdiction_topic_pairs_with_items(
         if len(items) >= min_items
     ]
 
+
+async def synthesize_law_snapshot(
+    session: AsyncSession,
+    jurisdiction_id: int,
+    topic: str,
+    items: list[PolicyItem],
+) -> LawSnapshot | None:
+    """Synthesize or update a LawSnapshot for a (jurisdiction, topic) pair.
+
+    Raises EnrichmentAPIError / EnrichmentParseError instead of returning
+    None, so the run counts the failure. A failed pair is remembered so the
+    next capped refresh tries pairs that have not failed first.
+    """
+    key = (jurisdiction_id, topic)
+    try:
+        snapshot = await _synthesize_law_snapshot(session, jurisdiction_id, topic, items)
+    except Exception:
+        _failed_last_attempt.add(key)
+        raise
+    _failed_last_attempt.discard(key)
+    return snapshot
+
 def order_pairs_for_refresh(
     pairs: list[tuple[int, str, list[PolicyItem]]],
     snapshots: dict[tuple[int, str], "LawSnapshot"],
 ) -> list[tuple[int, str, list[PolicyItem]]]:
     """Order (jurisdiction, topic) pairs so a capped refresh does the right ones.
 
-    First: pairs with items the last snapshot did not include (or no snapshot
-    yet). Then everything else. Inside each group, the oldest snapshot goes
-    first (no snapshot counts as oldest). Before this, the weekly run took the
-    same first 50 pairs in dict order every week.
+    Pairs whose last attempt failed go behind every pair that has not
+    failed, so one bad pair cannot hold a slot every week. Then: pairs with
+    items the last snapshot did not include (or no snapshot yet) come before
+    the rest. Inside each group, the oldest snapshot goes first (no snapshot
+    counts as oldest). Before this, the weekly run took the same first 50
+    pairs in dict order every week.
     """
     def key(pair):
         jur_id, topic, items = pair
+        failed = 1 if (jur_id, topic) in _failed_last_attempt else 0
         snap = snapshots.get((jur_id, topic))
         if snap is None:
-            return (0, 0, 0.0)
+            return (failed, 0, 0, 0.0)
         seen = set(snap.source_item_ids or [])
         has_new = any(item.id not in seen for item in items)
         updated = snap.updated_at.timestamp() if snap.updated_at else 0.0
-        return (0 if has_new else 1, 1, updated)
+        return (failed, 0 if has_new else 1, 1, updated)
 
     return sorted(pairs, key=key)
 
