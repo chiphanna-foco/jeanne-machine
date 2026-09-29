@@ -1,12 +1,15 @@
-# Vercel should only build the Next.js app in web/ — ignore everything else
+# Vercel should only build the Next.js app in web/ — ignore everything else.
+# Every directory pattern is anchored with a leading "/". An unanchored "api/"
+# also matched app/api/, so the Auth.js route (app/api/auth/[...nextauth]) was
+# dropped from the upload and /api/auth/* returned 404 in production.
 *.py
-adapters/
-enrichment/
-storage/
-digest/
-api/
-cli/
-tests/
+/adapters/
+/enrichment/
+/storage/
+/digest/
+/api/
+/cli/
+/tests/
 *.toml
 *.ini
 Dockerfile*
