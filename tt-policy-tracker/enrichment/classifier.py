@@ -5,12 +5,10 @@ that aren't about our target topics. Only documents passing this gate
 proceed to the more expensive Sonnet summarization.
 """
 
-import json
 import logging
 
-import anthropic
-
 from config import settings
+from enrichment.claude_client import create_json
 
 logger = logging.getLogger(__name__)
 
@@ -48,40 +46,30 @@ async def classify_document(text: str, max_chars: int = 8000) -> dict:
     """Classify a document for relevance to rental housing topics.
 
     Returns: {"relevant": bool, "topics": list[str], "confidence": float}
+
+    Raises EnrichmentAPIError when the API gives no answer, and
+    EnrichmentParseError when the answer is unparseable twice. It never
+    returns a made-up verdict: a fake "confidence 0.0" is how a dead key
+    used to silently drop the whole feed.
     """
     # Truncate to save tokens on the cheap model
     truncated = text[:max_chars]
 
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    result = await create_json(
+        "classifier",
+        model=settings.classifier_model,
+        max_tokens=200,
+        system=CLASSIFIER_SYSTEM_PROMPT,
+        messages=[
+            {
+                "role": "user",
+                "content": f"Classify this document:\n\n{truncated}",
+            }
+        ],
+    )
 
-    try:
-        response = await client.messages.create(
-            model=settings.classifier_model,
-            max_tokens=200,
-            system=CLASSIFIER_SYSTEM_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"Classify this document:\n\n{truncated}",
-                }
-            ],
-        )
-
-        raw = response.content[0].text.strip()
-
-        # Strip markdown fences if present
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-        result = json.loads(raw)
-
-        return {
-            "relevant": bool(result.get("relevant", False)),
-            "topics": result.get("topics", []),
-            "confidence": float(result.get("confidence", 0.0)),
-        }
-
-    except (json.JSONDecodeError, anthropic.APIError) as e:
-        logger.warning(f"Classifier error: {e}")
-        # On failure, let it through so we don't silently drop items
-        return {"relevant": True, "topics": [], "confidence": 0.0}
+    return {
+        "relevant": bool(result.get("relevant", False)),
+        "topics": result.get("topics", []),
+        "confidence": float(result.get("confidence", 0.0)),
+    }

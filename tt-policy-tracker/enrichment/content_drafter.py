@@ -5,14 +5,13 @@ drafts, social media posts, and newsletter blurbs for the TT content team.
 Human-in-the-loop: all drafts start as status="draft" and must be approved.
 """
 
-import json
 import logging
 
-import anthropic
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+from enrichment.claude_client import EnrichmentAPIError, EnrichmentParseError, create_json
 from storage.models import ContentDraft, PolicyItem
 
 logger = logging.getLogger(__name__)
@@ -104,24 +103,14 @@ async def _generate_draft(
         f"Source URL: {item.source_url or 'N/A'}\n"
     )
 
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-
-    try:
-        response = await client.messages.create(
-            model=settings.summarizer_model,
-            max_tokens=2000,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-
-        raw = response.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-        result = json.loads(raw)
-    except (json.JSONDecodeError, anthropic.APIError) as e:
-        logger.error(f"Content draft generation failed for item {item.id}: {e}")
-        return None
+    # Raises EnrichmentAPIError / EnrichmentParseError; the caller counts them.
+    result = await create_json(
+        f"content drafter item {item.id}",
+        model=settings.summarizer_model,
+        max_tokens=2000,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
 
     draft = ContentDraft(
         policy_item_id=item.id,
@@ -143,8 +132,15 @@ async def generate_drafts_for_high_impact(
     session: AsyncSession,
     min_impact: str = "med",
     max_drafts: int = 10,
+    counters: dict | None = None,
 ) -> list[ContentDraft]:
-    """Find high-impact PolicyItems without drafts and generate blog posts."""
+    """Find high-impact PolicyItems without drafts and generate blog posts.
+
+    Failures are counted in `counters["api_errors"]` / `["parse_errors"]`
+    when a dict is passed. A bad key stops the loop at the first failure.
+    """
+    if counters is None:
+        counters = {}
     impact_values = ["high"] if min_impact == "high" else ["high", "med"]
 
     # Find items that don't have a blog draft yet
@@ -167,7 +163,18 @@ async def generate_drafts_for_high_impact(
 
     drafts = []
     for item in items:
-        draft = await generate_blog_draft(session, item)
+        try:
+            draft = await generate_blog_draft(session, item)
+        except EnrichmentAPIError as e:
+            counters["api_errors"] = counters.get("api_errors", 0) + 1
+            logger.error(f"Content draft failed for item {item.id}: {e}")
+            if e.definitive:
+                break
+            continue
+        except EnrichmentParseError as e:
+            counters["parse_errors"] = counters.get("parse_errors", 0) + 1
+            logger.error(f"Content draft failed for item {item.id}: {e}")
+            continue
         if draft:
             drafts.append(draft)
 

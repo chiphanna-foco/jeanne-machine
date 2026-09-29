@@ -1,5 +1,12 @@
 # Fires /admin/cron-daily so the search pipeline runs even when nobody
 # clicks the admin button. Requires repo secrets API_BASE_URL and ADMIN_TOKEN.
+#
+# The endpoint only starts a background task and answers "started", so a
+# green trigger proves nothing. The verify step polls this run's own record
+# in /admin/pipeline-status (last_by_kind.daily, matched by run_token) and
+# fails the job when Claude API calls failed or queued docs were not
+# processed. A failed job posts to #chip-ai below, and the watchdog sees it.
+# This repo is public: the verify step prints counters only, never the body.
 name: Daily pipeline
 
 on:
@@ -10,6 +17,9 @@ on:
 jobs:
   trigger:
     runs-on: ubuntu-latest
+    # The run takes tens of minutes (OpenStates is paced at 8 s per request,
+    # then up to 300 docs are enriched). Verify waits up to 150 minutes.
+    timeout-minutes: 170
     steps:
       - name: Hit /admin/cron-daily
         env:
@@ -22,7 +32,72 @@ jobs:
             exit 1
           fi
           curl -sS --fail-with-body --max-time 30 \
-            "${API_BASE_URL%/}/admin/cron-daily?token=${ADMIN_TOKEN}"
+            "${API_BASE_URL%/}/admin/cron-daily?token=${ADMIN_TOKEN}" > trigger.json
+          jq -c '{status, run_token}' trigger.json
+
+      - name: Verify the run (red on API errors or nothing processed)
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -uo pipefail
+          run_token="$(jq -r '.run_token // empty' trigger.json)"
+          if [ -z "$run_token" ]; then
+            echo "::error::cron-daily returned no run_token (is the deployed API older than this workflow?)"
+            exit 1
+          fi
+
+          url="${API_BASE_URL%/}/admin/pipeline-status?token=${ADMIN_TOKEN}"
+          deadline=$(( $(date +%s) + 150 * 60 ))
+          read_failures=0
+          rec=""
+          while :; do
+            sleep 60
+            if ! body="$(curl -sS --fail --max-time 30 "$url" 2>/dev/null)"; then
+              read_failures=$((read_failures + 1))
+              echo "pipeline-status read failed ($read_failures in a row)"
+              if [ "$read_failures" -ge 5 ]; then
+                echo "::error::Could not read /admin/pipeline-status 5 times in a row"
+                exit 1
+              fi
+              continue
+            fi
+            read_failures=0
+            rec="$(echo "$body" | jq -c --arg t "$run_token" \
+              '.last_by_kind.daily // empty | select(.run_token == $t)')"
+            if [ -z "$rec" ]; then
+              # cron-daily writes the record before it returns, so a missing
+              # record means the API restarted (redeploy) and lost the run.
+              echo "::error::No record for daily run $run_token. The API probably restarted mid-run."
+              exit 1
+            fi
+            if [ "$(echo "$rec" | jq -r '.running')" = "false" ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::Daily run $run_token still running after 150 minutes"
+              exit 1
+            fi
+          done
+
+          counts="$(echo "$rec" | jq -c '.result | {queued, processed, relevant,
+            irrelevant, api_errors, parse_errors, api_stop_reason,
+            errors: (.errors | length)}')"
+          echo "daily run $run_token: $counts"
+          echo "Daily run \`$run_token\`: \`$counts\`" >> "$GITHUB_STEP_SUMMARY"
+
+          api_errors="$(echo "$counts" | jq -r '.api_errors // 0')"
+          queued="$(echo "$counts" | jq -r '.queued // 0')"
+          processed="$(echo "$counts" | jq -r '.processed // 0')"
+          if [ "$api_errors" -gt 0 ]; then
+            echo "::error::$api_errors Claude API error(s). Those docs stay queued for the next run."
+            exit 1
+          fi
+          if [ "$queued" -gt 0 ] && [ "$processed" -eq 0 ]; then
+            echo "::error::$queued doc(s) were queued but none was processed."
+            exit 1
+          fi
+          echo "Daily run OK."
 
       - name: Check out repo for failure notification
         if: failure()

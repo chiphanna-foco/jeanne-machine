@@ -5,12 +5,10 @@ action-needed classification. Uses tool-use / structured output for
 reliable JSON extraction.
 """
 
-import json
 import logging
 
-import anthropic
-
 from config import settings
+from enrichment.claude_client import create_json
 
 logger = logging.getLogger(__name__)
 
@@ -50,49 +48,39 @@ async def summarize_document(text: str, max_chars: int = 15000) -> dict:
 
     Returns dict with title, summary, impact_score, impact_reasoning,
     topics, action_needed, effective_date.
+
+    Raises EnrichmentAPIError (no answer; retry the doc later) or
+    EnrichmentParseError (unparseable twice).
     """
     truncated = text[:max_chars]
 
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    result = await create_json(
+        "summarizer",
+        model=settings.summarizer_model,
+        max_tokens=600,
+        system=SUMMARIZER_SYSTEM_PROMPT,
+        messages=[
+            {
+                "role": "user",
+                "content": f"Analyze this document:\n\n{truncated}",
+            }
+        ],
+    )
 
-    try:
-        response = await client.messages.create(
-            model=settings.summarizer_model,
-            max_tokens=600,
-            system=SUMMARIZER_SYSTEM_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"Analyze this document:\n\n{truncated}",
-                }
-            ],
-        )
+    # Validate and normalize
+    valid_scores = {"low", "med", "high"}
+    valid_actions = {"inform", "monitor", "urgent"}
 
-        raw = response.content[0].text.strip()
-
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-        result = json.loads(raw)
-
-        # Validate and normalize
-        valid_scores = {"low", "med", "high"}
-        valid_actions = {"inform", "monitor", "urgent"}
-
-        return {
-            "title": str(result.get("title", ""))[:90],
-            "summary": str(result.get("summary", "")),
-            "impact_score": result.get("impact_score", "low")
-            if result.get("impact_score") in valid_scores
-            else "low",
-            "impact_reasoning": str(result.get("impact_reasoning", "")),
-            "topics": result.get("topics", []),
-            "action_needed": result.get("action_needed", "inform")
-            if result.get("action_needed") in valid_actions
-            else "inform",
-            "effective_date": result.get("effective_date"),
-        }
-
-    except (json.JSONDecodeError, anthropic.APIError) as e:
-        logger.error(f"Summarizer error: {e}")
-        raise
+    return {
+        "title": str(result.get("title", ""))[:90],
+        "summary": str(result.get("summary", "")),
+        "impact_score": result.get("impact_score", "low")
+        if result.get("impact_score") in valid_scores
+        else "low",
+        "impact_reasoning": str(result.get("impact_reasoning", "")),
+        "topics": result.get("topics", []),
+        "action_needed": result.get("action_needed", "inform")
+        if result.get("action_needed") in valid_actions
+        else "inform",
+        "effective_date": result.get("effective_date"),
+    }
