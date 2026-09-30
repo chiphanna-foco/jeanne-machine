@@ -310,6 +310,9 @@ GOOD = {"ingested": 40, "queued": 300, "processed": 298, "relevant": 12, "irrele
         ({}, []),
         ({"api_errors": 5}, ["Claude API error"]),
         ({"parse_errors": 1, "parse_failed_ids": ["legiscan-9"]}, ["legiscan-9"]),
+        ({"parse_errors": 1, "parse_failed_ids": ["legiscan-9"],
+          "parse_failed_reasons": {"legiscan-9": "summarizer: stop_reason=refusal"}},
+         ["legiscan-9 (summarizer: stop_reason=refusal)"]),
         ({"processed": 0, "relevant": 0, "irrelevant": 0}, ["none was processed"]),
         ({"ingested": 0}, ["nothing was ingested"]),
         ({"ingested": 0, "errors": []}, []),  # a quiet day with no errors is fine

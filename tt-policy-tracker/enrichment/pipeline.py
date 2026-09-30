@@ -212,6 +212,8 @@ def new_run_counters() -> dict:
         "api_errors": 0,
         "parse_errors": 0,
         "parse_failed_ids": [],
+        # external_id -> why (stage and problem), so a red run says what broke.
+        "parse_failed_reasons": {},
         "consecutive_api_errors": 0,
         "api_stop_reason": None,
     }
@@ -249,6 +251,7 @@ async def enrich_counted(
         counters["consecutive_api_errors"] = 0
         if len(counters["parse_failed_ids"]) < MAX_PARSE_FAILED_IDS:
             counters["parse_failed_ids"].append(raw.external_id)
+            counters.setdefault("parse_failed_reasons", {})[raw.external_id] = str(e)[:200]
         logger.error(f"Unparseable model output, doc consumed: {raw.external_id}: {e}")
         return None
 

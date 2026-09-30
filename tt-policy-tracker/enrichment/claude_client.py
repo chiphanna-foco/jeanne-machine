@@ -96,13 +96,29 @@ def response_text(response) -> str:
     return raw
 
 
-async def create_json(label: str, **kwargs) -> dict:
+def json_schema_format(schema: dict) -> dict:
+    """`output_config.format` for structured outputs: the API then returns
+    only JSON matching `schema` (unless the answer is cut off or refused)."""
+    return {"type": "json_schema", "schema": schema}
+
+
+async def create_json(label: str, schema: dict | None = None, **kwargs) -> dict:
     """Call Claude and parse a JSON object from its text.
+
+    `schema` turns on structured outputs, so the answer is constrained to
+    valid JSON of that shape. Without it the prompt alone asks for JSON,
+    which let a model add prose around the object (daily run 36742000954
+    dropped two docs that way or by a cut-off; the logs did not say which).
 
     Bad output is often a one-off, so an unparseable answer gets exactly one
     more call. A second failure raises EnrichmentParseError. API failures
     raise EnrichmentAPIError at once and are never retried here.
     """
+    if schema is not None:
+        kwargs["output_config"] = {
+            **(kwargs.get("output_config") or {}),
+            "format": json_schema_format(schema),
+        }
     last_problem = ""
     for attempt in (1, 2):
         response = await create_message(**kwargs)
@@ -110,15 +126,21 @@ async def create_json(label: str, **kwargs) -> dict:
         if stop_reason in FAILED_STOP_REASONS:
             # A cut-off or declined answer is bad output, not an API outage:
             # retry once, then consume the doc and count a parse error.
-            logger.warning(f"{label}: stop_reason={stop_reason} (attempt {attempt}/2)")
             last_problem = f"stop_reason={stop_reason}"
+            category = getattr(getattr(response, "stop_details", None), "category", None)
+            if category:
+                last_problem += f" ({category})"
+            logger.warning(f"{label}: {last_problem} (attempt {attempt}/2)")
             continue
         raw = response_text(response)
         try:
             result = json.loads(raw)
         except json.JSONDecodeError as e:
-            logger.warning(f"{label}: unparseable model output (attempt {attempt}/2): {e}")
-            last_problem = "unparseable JSON"
+            logger.warning(
+                f"{label}: unparseable model output (attempt {attempt}/2): {e}; "
+                f"head={raw[:200]!r}"
+            )
+            last_problem = f"unparseable JSON: {e.msg} at char {e.pos}"
             continue
         if isinstance(result, dict):
             return result

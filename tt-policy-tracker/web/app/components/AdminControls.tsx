@@ -73,6 +73,9 @@ interface Action {
   // Read-only data endpoints: show the JSON response inline instead of a
   // "started" message, and stay enabled even while a pipeline is running.
   view?: boolean;
+  // Asks for one value before running, appended to `path` as `name=value`
+  // (commas split into repeated params).
+  ask?: { name: string; prompt: string };
 }
 
 const ACTIONS: Action[] = [
@@ -183,6 +186,15 @@ const ACTIONS: Action[] = [
     view: true,
   },
   {
+    key: "reenrich",
+    label: "Re-run Dropped Docs",
+    description: "Re-enrich docs a run dropped as unparseable (paste the ids from the red run alert). Shows relevant / irrelevant / why it failed again.",
+    path: "/admin/reenrich",
+    icon: "♻️",
+    view: true,
+    ask: { name: "external_id", prompt: "External ids to re-run (comma-separated):" },
+  },
+  {
     key: "probe-co-bill",
     label: "Probe OpenStates (CO HB26-1196)",
     description: "Ask OpenStates directly what it has for a state/bill — distinguishes a source-coverage gap from an ingestion miss.",
@@ -276,10 +288,22 @@ export function AdminControls() {
       setMessage(`${action.label}: an admin token is needed for this action.`);
       return;
     }
+    let path = action.path;
+    if (action.ask) {
+      const values = (window.prompt(action.ask.prompt) || "")
+        .split(",")
+        .map((v) => v.trim())
+        .filter(Boolean);
+      if (!values.length) return;
+      const query = values
+        .map((v) => `${action.ask!.name}=${encodeURIComponent(v)}`)
+        .join("&");
+      path = `${path}${path.includes("?") ? "&" : "?"}${query}`;
+    }
     setBusy(true);
     setMessage(null);
     try {
-      const resp = await fetch(backend(appendToken(action.path, token)));
+      const resp = await fetch(backend(appendToken(path, token)));
       const data = await resp.json();
       if (resp.ok) {
         if (action.view) {

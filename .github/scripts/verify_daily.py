@@ -42,7 +42,11 @@ def failures(result: dict) -> list[str]:
     if api_errors:
         out.append(f"{api_errors} Claude API error(s); those docs stay queued for the next run")
     if parse_errors:
-        ids = ", ".join(result.get("parse_failed_ids") or []) or "none recorded"
+        reasons = result.get("parse_failed_reasons") or {}
+        ids = ", ".join(
+            f"{i} ({reasons[i]})" if i in reasons else i
+            for i in (result.get("parse_failed_ids") or [])
+        ) or "none recorded"
         out.append(f"{parse_errors} doc(s) had unparseable model output and were dropped: {ids}")
     if queued and not processed:
         out.append(f"{queued} doc(s) were queued but none was processed")

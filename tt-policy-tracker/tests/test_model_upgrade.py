@@ -77,7 +77,10 @@ async def test_summarizer_request_shape_and_reads_text_after_thinking(monkeypatc
     kw = create.await_args.kwargs
     assert kw["model"] == "claude-sonnet-5-5"
     assert kw["thinking"] == {"type": "between_tools"}  # no other field
-    assert kw["output_config"] == {"effort": "medium"}
+    assert kw["output_config"] == {
+        "effort": "medium",
+        "format": {"type": "json_schema", "schema": summarizer.SUMMARIZER_SCHEMA},
+    }
     assert kw["max_tokens"] > 600
     for banned in ("temperature", "top_p", "top_k"):
         assert banned not in kw
@@ -90,6 +93,44 @@ async def test_summarizer_incomplete_answer_is_a_failure(monkeypatch, stop_reaso
     with pytest.raises(EnrichmentParseError, match=f"stop_reason={stop_reason}"):
         await summarizer.summarize_document("doc")
     assert create.await_count == 2  # retried once
+
+
+async def test_classifier_requests_structured_output(monkeypatch):
+    create = _patch_client(monkeypatch, classifier, _reply(
+        {"relevant": False, "funding_only": False, "topics": [], "confidence": 0.2}
+    ))
+    await classifier.classify_document("doc")
+    fmt = create.await_args.kwargs["output_config"]["format"]
+    assert fmt == {"type": "json_schema", "schema": classifier.CLASSIFIER_SCHEMA}
+
+
+@pytest.mark.parametrize("schema", [classifier.CLASSIFIER_SCHEMA, summarizer.SUMMARIZER_SCHEMA])
+def test_schemas_meet_structured_output_rules(schema):
+    """Every field required and no extra properties, as the API demands."""
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == set(schema["properties"])
+
+
+async def test_refusal_category_is_in_the_parse_error(monkeypatch):
+    refused = _reply("", stop_reason="refusal")
+    refused.stop_details = SimpleNamespace(category="general_harms")
+    _patch_client(monkeypatch, summarizer, [refused, refused])
+    with pytest.raises(EnrichmentParseError, match=r"refusal \(general_harms\)"):
+        await summarizer.summarize_document("doc")
+
+
+async def test_parse_failure_reason_is_recorded_per_doc(monkeypatch):
+    """Run 36742000954 went red with two ids and no hint of the cause."""
+    relevant = {"relevant": True, "funding_only": False, "topics": ["eviction"], "confidence": 0.9}
+    prose = _reply('Here is the analysis: {"title": "x"}')
+    _patch_client(monkeypatch, summarizer, [_reply(relevant), prose, prose])
+    raw = RawDocument(id=1, external_id="ocd-bill/x", raw_text="An act concerning evictions.")
+    counters = new_run_counters()
+
+    await enrich_counted(_synth_session(), raw, counters)
+
+    why = counters["parse_failed_reasons"]["ocd-bill/x"]
+    assert why.startswith("summarizer:") and "unparseable JSON" in why
 
 
 async def test_max_tokens_cutoff_is_counted_not_silently_dropped(monkeypatch):
