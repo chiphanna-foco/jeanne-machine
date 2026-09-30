@@ -8,6 +8,7 @@ reliable JSON extraction.
 import logging
 
 from config import settings
+from enrichment.classifier import TOPICS
 from enrichment.claude_client import create_json
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,25 @@ Respond with ONLY valid JSON (no markdown):
 }"""
 
 
+SUMMARIZER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "summary": {"type": "string"},
+        "impact_score": {"type": "string", "enum": ["low", "med", "high"]},
+        "impact_reasoning": {"type": "string"},
+        "topics": {"type": "array", "items": {"type": "string", "enum": TOPICS}},
+        "action_needed": {"type": "string", "enum": ["inform", "monitor", "urgent"]},
+        "effective_date": {"anyOf": [{"type": "string", "format": "date"}, {"type": "null"}]},
+    },
+    "required": [
+        "title", "summary", "impact_score", "impact_reasoning",
+        "topics", "action_needed", "effective_date",
+    ],
+    "additionalProperties": False,
+}
+
+
 async def summarize_document(text: str, max_chars: int = 15000) -> dict:
     """Produce a structured summary of a policy document.
 
@@ -56,6 +76,7 @@ async def summarize_document(text: str, max_chars: int = 15000) -> dict:
 
     result = await create_json(
         "summarizer",
+        schema=SUMMARIZER_SCHEMA,
         model=settings.summarizer_model,
         # Was 600: long answers were cut off at max_tokens and dropped as
         # unparseable (daily run 36631928623, one doc).

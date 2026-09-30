@@ -44,6 +44,25 @@ Respond with ONLY valid JSON (no markdown):
 {"relevant": true/false, "funding_only": true/false, "topics": ["topic_1", "topic_2"], "confidence": 0.0-1.0}"""
 
 
+TOPICS = [
+    "landlord_tenant_law", "security_deposit", "eviction", "source_of_income",
+    "rental_registration", "screening_restrictions", "application_fee_limit",
+    "rent_control", "habitability", "fair_housing",
+]
+
+CLASSIFIER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "relevant": {"type": "boolean"},
+        "funding_only": {"type": "boolean"},
+        "topics": {"type": "array", "items": {"type": "string", "enum": TOPICS}},
+        "confidence": {"type": "number"},
+    },
+    "required": ["relevant", "funding_only", "topics", "confidence"],
+    "additionalProperties": False,
+}
+
+
 async def classify_document(text: str, max_chars: int = 8000) -> dict:
     """Classify a document for relevance to rental housing topics.
 
@@ -60,6 +79,7 @@ async def classify_document(text: str, max_chars: int = 8000) -> dict:
 
     result = await create_json(
         "classifier",
+        schema=CLASSIFIER_SCHEMA,
         model=settings.classifier_model,
         max_tokens=200,
         system=CLASSIFIER_SYSTEM_PROMPT,
