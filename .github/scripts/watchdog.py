@@ -26,8 +26,10 @@ What it checks
     labelled as such, because that is a GitHub capacity problem and not a repo
     problem, and the two want very different responses.
   * STALE CRONS: for each workflow in STALENESS_HOURS, how long since its last
-    *successful* run. Past the threshold, the cron is presumed missed -- this
-    is the only check that can catch a schedule that never fired.
+    run of any outcome. Past the threshold, the cron is presumed missed -- this
+    is the only check that can catch a schedule that never fired. A cron that
+    fired and failed is not "missed": the failed-run check already reported
+    it, so it is not reported again as stale.
 
 Alert state lives in a JSON file (--state) that the workflow persists through
 the Actions cache, so an alert fires once rather than once per hourly sweep.
@@ -63,7 +65,7 @@ SLACK_CHANNEL_ID = "C0AC0C1L0NM"
 # Each is the longest legitimate gap plus roughly one period of slack, since
 # GitHub routinely delays scheduled events by an hour or more.
 STALENESS_HOURS = {
-    "cron-daily.yml": 30,  # daily 10:00 UTC
+    "cron-daily.yml": 36,  # daily 10:00 UTC; GitHub has started it up to 9h late
     "cron-search.yml": 30,  # daily 06:15 UTC
     "cron-digest.yml": 120,  # Mon + Thu 16:00 UTC -> 4d max gap, +1d slack
     "cron-weekly-full.yml": 192,  # Fri 23:00 UTC -> 7d gap, +1d slack
@@ -157,9 +159,8 @@ def collect_failed_runs(repo: str, token: str, self_run_id: str) -> list[dict]:
     return failures
 
 
-def last_success(repo: str, workflow_file: str, token: str) -> dict | None:
-    """Newest successful run of a workflow, found by reading recent runs and checking
-    `conclusion` ourselves.
+def recent_runs(repo: str, workflow_file: str, token: str) -> list[dict]:
+    """Newest-first runs of a workflow, read raw and filtered by us.
 
     Deliberately NOT `?status=success`. That filter is unreliable: on 2026-08-10 the API
     returned Aug 9 / 8 / 7 for cron-search.yml and silently omitted run 31368410789 from Aug 10,
@@ -169,9 +170,26 @@ def last_success(repo: str, workflow_file: str, token: str) -> dict | None:
     muted, so it reads the raw list and decides for itself.
     """
     data = gh_get(f"/repos/{repo}/actions/workflows/{workflow_file}/runs", token, per_page=30)
-    for run in data.get("workflow_runs", []):
+    return data.get("workflow_runs", [])
+
+
+def last_success(runs: list[dict]) -> dict | None:
+    for run in runs:
         if run.get("status") == "completed" and run.get("conclusion") == "success":
             return run
+    return None
+
+
+def last_fired(runs: list[dict]) -> dict | None:
+    """Newest run that a runner actually started, whatever its outcome.
+
+    A run that never got a runner proves the schedule fired but nothing ran;
+    it is reported by the failed-run check, and it does not count here.
+    """
+    for run in runs:
+        if run.get("conclusion") == "startup_failure":
+            continue
+        return run
     return None
 
 
@@ -179,7 +197,7 @@ def collect_stale_crons(repo: str, token: str) -> list[dict]:
     stale = []
     for workflow_file, max_hours in sorted(STALENESS_HOURS.items()):
         try:
-            last = last_success(repo, workflow_file, token)
+            runs = recent_runs(repo, workflow_file, token)
         except urllib.error.HTTPError as exc:
             # A workflow that has been renamed or deleted should be noticed,
             # not skipped -- silence here would hide the cron disappearing.
@@ -190,6 +208,15 @@ def collect_stale_crons(repo: str, token: str) -> list[dict]:
                     "detail": f"cannot read runs (HTTP {exc.code}) -- was it renamed or deleted?",
                 }
             )
+            continue
+
+        last = last_success(runs)
+        fired = last_fired(runs)
+        if fired is not None and now() - parse_ts(fired["created_at"]) <= timedelta(hours=max_hours):
+            # It ran recently. If that run failed, the failed-run check has
+            # already said so; "looks missed" would be a second, wrong alert
+            # for the same failure (Oct 2-5, 2026: every red daily run was
+            # followed hours later by a "cron-daily looks missed" post).
             continue
 
         if last is None:
