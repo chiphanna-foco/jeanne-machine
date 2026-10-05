@@ -131,17 +131,45 @@ async def test_bad_json_retries_once_then_succeeds(claude):
     assert counters["parse_errors"] == 0 and counters["irrelevant"] == 1
 
 
-async def test_bad_json_twice_consumes_doc_and_records_it(claude):
+async def test_bad_json_twice_leaves_doc_queued_for_next_run(claude):
     claude.side_effect = [_reply("not json"), _reply("still not json")]
     raw, counters = _raw(), new_run_counters()
 
     item = await enrich_counted(_session(), raw, counters)
 
     assert item is None
+    assert raw.classified_at is None  # retried next run
+    assert raw.parse_failures == 1
+    assert counters["parse_errors"] == 0
+    assert counters["parse_retries"] == 1
+    assert counters["parse_retry_ids"] == ["test-doc-1"]
+    assert counters["processed"] == 0
+
+
+async def test_bad_json_on_third_run_consumes_doc_and_records_it(claude):
+    claude.side_effect = [_reply("not json"), _reply("still not json")]
+    raw, counters = _raw(), new_run_counters()
+    raw.parse_failures = 2  # failed the two previous runs
+
+    item = await enrich_counted(_session(), raw, counters)
+
+    assert item is None
     assert raw.classified_at is not None  # cannot retry forever
+    assert raw.parse_failures == 3
     assert counters["parse_errors"] == 1
     assert counters["parse_failed_ids"] == ["test-doc-1"]
-    assert counters["processed"] == 0
+    assert counters["parse_retries"] == 0
+
+
+async def test_summarizer_bad_json_also_retries_next_run(claude):
+    claude.side_effect = [_reply(RELEVANT), _reply("x"), _reply("y")]
+    raw, counters = _raw(), new_run_counters()
+
+    item = await enrich_counted(_session(), raw, counters)
+
+    assert item is None
+    assert raw.classified_at is None
+    assert counters["parse_retries"] == 1 and counters["parse_errors"] == 0
 
 
 async def test_empty_key_is_an_api_error_without_a_network_call(claude, monkeypatch):
@@ -313,6 +341,8 @@ GOOD = {"ingested": 40, "queued": 300, "processed": 298, "relevant": 12, "irrele
         ({"parse_errors": 1, "parse_failed_ids": ["legiscan-9"],
           "parse_failed_reasons": {"legiscan-9": "summarizer: stop_reason=refusal"}},
          ["legiscan-9 (summarizer: stop_reason=refusal)"]),
+        ({"parse_retries": 2, "parse_retry_ids": ["a", "b"]}, []),  # retried next run
+        ({"parse_retries": 5, "parse_retry_ids": ["a"]}, ["queued for retry"]),
         ({"processed": 0, "relevant": 0, "irrelevant": 0}, ["none was processed"]),
         ({"ingested": 0}, ["nothing was ingested"]),
         ({"ingested": 0, "errors": []}, []),  # a quiet day with no errors is fine

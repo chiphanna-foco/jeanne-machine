@@ -24,9 +24,12 @@ import urllib.request
 POLL_SECONDS = 60
 TIMEOUT_MINUTES = 150
 MAX_READ_FAILURES = 5
+# Docs left queued after unparseable output, in one run, that still turn it
+# red: one or two is a one-off the next run retries; this many is a pattern.
+MAX_PARSE_RETRIES = 5
 COUNT_KEYS = (
     "ingested", "queued", "processed", "relevant", "irrelevant",
-    "api_errors", "parse_errors", "api_stop_reason", "stopped_for_time",
+    "api_errors", "parse_errors", "parse_retries", "api_stop_reason", "stopped_for_time",
 )
 
 
@@ -35,6 +38,7 @@ def failures(result: dict) -> list[str]:
     out = []
     api_errors = result.get("api_errors") or 0
     parse_errors = result.get("parse_errors") or 0
+    parse_retries = result.get("parse_retries") or 0
     queued = result.get("queued") or 0
     processed = result.get("processed") or 0
     ingested = result.get("ingested") or 0
@@ -47,7 +51,14 @@ def failures(result: dict) -> list[str]:
             f"{i} ({reasons[i]})" if i in reasons else i
             for i in (result.get("parse_failed_ids") or [])
         ) or "none recorded"
-        out.append(f"{parse_errors} doc(s) had unparseable model output and were dropped: {ids}")
+        out.append(
+            f"{parse_errors} doc(s) had unparseable model output 3 runs in a row and were dropped: {ids}"
+        )
+    if parse_retries >= MAX_PARSE_RETRIES:
+        ids = ", ".join(result.get("parse_retry_ids") or []) or "none recorded"
+        out.append(
+            f"{parse_retries} doc(s) had unparseable model output this run (queued for retry): {ids}"
+        )
     if queued and not processed:
         out.append(f"{queued} doc(s) were queued but none was processed")
     if errors and not ingested:
@@ -118,6 +129,11 @@ def main() -> int:
     if step_summary:
         with open(step_summary, "a") as fh:
             fh.write(f"Daily run `{run_token}`: `{counts}`\n")
+
+    retries = result.get("parse_retries") or 0
+    if 0 < retries < MAX_PARSE_RETRIES:
+        ids = ", ".join(result.get("parse_retry_ids") or [])
+        print(f"::warning::{retries} doc(s) had unparseable output and will be retried next run: {ids}")
 
     problems = failures(result)
     for p in problems:

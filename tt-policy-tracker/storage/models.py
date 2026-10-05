@@ -65,6 +65,9 @@ class RawDocument(Base):
     # regardless of verdict. Used to exclude already-classified docs from
     # the enrichment queue so rejected docs don't get re-processed forever.
     classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Runs whose model output for this doc stayed unparseable. The doc stays
+    # queued until this reaches MAX_PARSE_ATTEMPTS (enrichment.pipeline).
+    parse_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     content_hash: Mapped[str | None] = mapped_column(Text)
     raw_text: Mapped[str | None] = mapped_column(Text)
 
