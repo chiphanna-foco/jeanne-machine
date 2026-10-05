@@ -1914,6 +1914,62 @@ async def reclassify_housing(
     return {"candidates_with_subject_tag": checked, "newly_surfaced": resurfaced}
 
 
+@app.get("/admin/reenrich")
+async def admin_reenrich(
+    external_id: list[str] = Query(default=[]),
+    token: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Re-run enrichment on specific raw docs, by external_id (repeatable).
+
+    For docs a run dropped as unparseable (the ids a red daily run lists):
+    they were marked classified, so no queue picks them up again. This
+    re-opens each one that has no PolicyItem and enriches it now, and says
+    per doc whether it became relevant, irrelevant, or failed again (and
+    why). Does not post to Slack.
+
+      GET /admin/reenrich?external_id=ocd-bill/...&external_id=ocd-bill/...&token=...
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+    ids = [i.strip() for raw_ids in external_id for i in raw_ids.split(",") if i.strip()]
+    if not ids:
+        return JSONResponse(status_code=400, content={"error": "Pass at least one external_id"})
+    if len(ids) > 20:
+        return JSONResponse(status_code=400, content={"error": "At most 20 external_ids per call"})
+
+    from enrichment.pipeline import enrich_counted, new_run_counters
+
+    out = []
+    for ext_id in ids:
+        raw = (
+            await session.execute(select(RawDocument).where(RawDocument.external_id == ext_id))
+        ).scalars().first()
+        if raw is None:
+            out.append({"external_id": ext_id, "result": "not_found"})
+            continue
+        item = (
+            await session.execute(select(PolicyItem).where(PolicyItem.raw_document_id == raw.id))
+        ).scalars().first()
+        if item is not None:
+            out.append({"external_id": ext_id, "result": "already_enriched", "item_id": item.id})
+            continue
+        raw.classified_at = None
+        counters = new_run_counters()
+        new_item = await enrich_counted(session, raw, counters)
+        await session.commit()
+        if new_item is not None:
+            entry = {"result": "relevant", "item_id": new_item.id, "title": new_item.title}
+        elif counters["parse_errors"]:
+            entry = {"result": "unparseable", "why": counters["parse_failed_reasons"].get(ext_id)}
+        elif counters["api_errors"]:
+            entry = {"result": "api_error", "why": counters["api_stop_reason"]}
+        else:
+            entry = {"result": "irrelevant"}
+        out.append({"external_id": ext_id, **entry})
+    return {"docs": out}
+
+
 @app.get("/admin/legiscan-trace")
 async def legiscan_trace(
     bill_id: int,
