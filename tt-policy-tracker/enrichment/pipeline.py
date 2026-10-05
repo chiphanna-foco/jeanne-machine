@@ -97,7 +97,8 @@ async def enrich_document(session: AsyncSession, raw: RawDocument) -> PolicyItem
     irrelevant (or already enriched).
 
     Raises EnrichmentAPIError (doc left unclassified, retried next run) or
-    EnrichmentParseError (doc marked classified; caller must commit).
+    EnrichmentParseError (parse_failures bumped; the doc is marked classified
+    only once it has failed MAX_PARSE_ATTEMPTS runs; caller must commit).
     Callers that loop over a queue should use enrich_counted() instead.
     """
     # Check if already enriched
@@ -114,12 +115,13 @@ async def enrich_document(session: AsyncSession, raw: RawDocument) -> PolicyItem
     # classified_at is set ONLY after a definitive verdict: a real
     # "irrelevant", or relevant plus a successful summary. An
     # EnrichmentAPIError propagates with classified_at still null, so the
-    # next run retries the doc. Unparseable output (after one retry) is the
-    # one failure that consumes the doc, so it cannot retry forever.
+    # next run retries the doc. Unparseable output (after one in-call retry)
+    # also leaves it queued, up to MAX_PARSE_ATTEMPTS runs, then consumes it
+    # so it cannot retry forever.
     try:
         classification = await classify_document(text)
     except EnrichmentParseError:
-        raw.classified_at = datetime.utcnow()
+        _record_parse_failure(raw)
         raise
 
     # Strong curated-subject override: a bill tagged with a housing subject
@@ -156,7 +158,7 @@ async def enrich_document(session: AsyncSession, raw: RawDocument) -> PolicyItem
     try:
         summary = await summarize_document(text)
     except EnrichmentParseError:
-        raw.classified_at = datetime.utcnow()
+        _record_parse_failure(raw)
         raise
     raw.classified_at = datetime.utcnow()
 
@@ -197,6 +199,16 @@ async def enrich_document(session: AsyncSession, raw: RawDocument) -> PolicyItem
 MAX_CONSECUTIVE_API_ERRORS = 5
 # How many parse-consumed external_ids a run keeps, so they can be healed.
 MAX_PARSE_FAILED_IDS = 20
+# Runs a doc may fail with unparseable output before it is dropped. A bad
+# answer is usually a one-off, and 4 of the 7 docs dropped on the first try
+# (Sep 30 to Oct 5, 2026) turned out to be relevant when re-run.
+MAX_PARSE_ATTEMPTS = 3
+
+
+def _record_parse_failure(raw: RawDocument) -> None:
+    raw.parse_failures = (raw.parse_failures or 0) + 1
+    if raw.parse_failures >= MAX_PARSE_ATTEMPTS:
+        raw.classified_at = datetime.utcnow()
 
 
 def new_run_counters() -> dict:
@@ -214,6 +226,9 @@ def new_run_counters() -> dict:
         "parse_failed_ids": [],
         # external_id -> why (stage and problem), so a red run says what broke.
         "parse_failed_reasons": {},
+        # Unparseable this run but still queued for the next one.
+        "parse_retries": 0,
+        "parse_retry_ids": [],
         "consecutive_api_errors": 0,
         "api_stop_reason": None,
     }
@@ -231,7 +246,8 @@ async def enrich_counted(
 
     Returns the PolicyItem or None. Never raises the two enrichment errors;
     it counts them. The caller commits the session either way: after an API
-    error nothing on `raw` changed, after a parse error `classified_at` is set.
+    error nothing on `raw` changed, after a parse error `parse_failures` went
+    up (and `classified_at` is set once the doc is out of attempts).
     """
     try:
         item = await enrich_document(session, raw)
@@ -247,12 +263,25 @@ async def enrich_counted(
             )
         return None
     except EnrichmentParseError as e:
-        counters["parse_errors"] += 1
         counters["consecutive_api_errors"] = 0
+        if raw.classified_at is None:
+            counters["parse_retries"] = counters.get("parse_retries", 0) + 1
+            retry_ids = counters.setdefault("parse_retry_ids", [])
+            if len(retry_ids) < MAX_PARSE_FAILED_IDS:
+                retry_ids.append(raw.external_id)
+            logger.warning(
+                f"Unparseable model output, doc left for retry "
+                f"({raw.parse_failures}/{MAX_PARSE_ATTEMPTS}): {raw.external_id}: {e}"
+            )
+            return None
+        counters["parse_errors"] += 1
         if len(counters["parse_failed_ids"]) < MAX_PARSE_FAILED_IDS:
             counters["parse_failed_ids"].append(raw.external_id)
             counters.setdefault("parse_failed_reasons", {})[raw.external_id] = str(e)[:200]
-        logger.error(f"Unparseable model output, doc consumed: {raw.external_id}: {e}")
+        logger.error(
+            f"Unparseable model output {MAX_PARSE_ATTEMPTS} runs in a row, doc consumed: "
+            f"{raw.external_id}: {e}"
+        )
         return None
 
     counters["consecutive_api_errors"] = 0

@@ -12,7 +12,9 @@ name: Daily pipeline
 
 on:
   schedule:
-    - cron: "0 10 * * *"
+    # Off the hour on purpose: GitHub delays top-of-hour schedules the most
+    # (the 10:00 run started as late as 18:55 UTC in Oct 2026).
+    - cron: "37 10 * * *"
   workflow_dispatch:
 
 # One daily run at a time. A manual dispatch waits for the scheduled run

@@ -73,6 +73,10 @@ async def lifespan(app: FastAPI):
                 "ALTER TABLE policy_item "
                 "ADD COLUMN IF NOT EXISTS effective_alert_sent_at TIMESTAMPTZ"
             ))
+            conn.execute(text(
+                "ALTER TABLE raw_document "
+                "ADD COLUMN IF NOT EXISTS parse_failures INTEGER NOT NULL DEFAULT 0"
+            ))
             conn.commit()
         sync_engine.dispose()
         logger.info("Database tables ready")
@@ -1955,6 +1959,7 @@ async def admin_reenrich(
             out.append({"external_id": ext_id, "result": "already_enriched", "item_id": item.id})
             continue
         raw.classified_at = None
+        raw.parse_failures = 0
         counters = new_run_counters()
         new_item = await enrich_counted(session, raw, counters)
         await session.commit()

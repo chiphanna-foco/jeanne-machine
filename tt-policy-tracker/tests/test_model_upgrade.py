@@ -125,6 +125,7 @@ async def test_parse_failure_reason_is_recorded_per_doc(monkeypatch):
     prose = _reply('Here is the analysis: {"title": "x"}')
     _patch_client(monkeypatch, summarizer, [_reply(relevant), prose, prose])
     raw = RawDocument(id=1, external_id="ocd-bill/x", raw_text="An act concerning evictions.")
+    raw.parse_failures = 2  # last allowed run, so the doc is dropped and listed
     counters = new_run_counters()
 
     await enrich_counted(_synth_session(), raw, counters)
@@ -139,6 +140,7 @@ async def test_max_tokens_cutoff_is_counted_not_silently_dropped(monkeypatch):
     cut = _reply('{"title": "Colorado caps', stop_reason="max_tokens")
     _patch_client(monkeypatch, summarizer, [_reply(relevant), cut, cut])
     raw = RawDocument(id=1, external_id="ocd-bill/test", raw_text="An act concerning evictions.")
+    raw.parse_failures = 2  # last allowed run, so the doc is dropped and listed
     counters = new_run_counters()
 
     item = await enrich_counted(_synth_session(), raw, counters)

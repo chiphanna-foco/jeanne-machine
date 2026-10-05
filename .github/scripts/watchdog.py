@@ -65,7 +65,7 @@ SLACK_CHANNEL_ID = "C0AC0C1L0NM"
 # Each is the longest legitimate gap plus roughly one period of slack, since
 # GitHub routinely delays scheduled events by an hour or more.
 STALENESS_HOURS = {
-    "cron-daily.yml": 36,  # daily 10:00 UTC; GitHub has started it up to 9h late
+    "cron-daily.yml": 36,  # daily 10:37 UTC; GitHub has started it up to 9h late
     "cron-search.yml": 30,  # daily 06:15 UTC
     "cron-digest.yml": 120,  # Mon + Thu 16:00 UTC -> 4d max gap, +1d slack
     "cron-weekly-full.yml": 192,  # Fri 23:00 UTC -> 7d gap, +1d slack
