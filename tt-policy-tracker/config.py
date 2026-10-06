@@ -148,9 +148,13 @@ class Settings(BaseSettings):
 
     @property
     def sync_database_url(self) -> str:
-        """For Alembic and table creation (sync driver)."""
+        """For Alembic and table creation (sync driver).
+
+        Names psycopg2 explicitly: SQLAlchemy 2.1 maps a bare postgresql://
+        to psycopg (v3), which isn't installed, so startup migrations failed.
+        """
         url = self.database_url
-        url = re.sub(r"^postgres(ql)?(\+asyncpg)?://", "postgresql://", url)
+        url = re.sub(r"^postgres(ql)?(\+\w+)?://", "postgresql+psycopg2://", url)
         return url
 
     @property

@@ -74,7 +74,17 @@ def run_schema_migrations(attempts: int = 3, lock_timeout_s: int = 10) -> dict:
 
     global _migration_status
     steps: list[dict] = []
-    sync_engine = create_engine(settings.sync_database_url)
+    try:
+        sync_engine = create_engine(settings.sync_database_url)
+    except Exception as e:
+        error = f"{type(e).__name__}: {str(e)[:300]}"
+        logger.error(f"Schema migration could not connect: {error}")
+        _migration_status = {
+            "ok": False,
+            "ran_at": datetime.utcnow().isoformat(),
+            "steps": [{"step": "create engine", "ok": False, "error": error}],
+        }
+        return _migration_status
     try:
         plan = [
             ("vector extension", "CREATE EXTENSION IF NOT EXISTS vector"),
