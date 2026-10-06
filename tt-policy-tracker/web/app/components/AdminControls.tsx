@@ -186,6 +186,14 @@ const ACTIONS: Action[] = [
     view: true,
   },
   {
+    key: "relevance-audit",
+    label: "Check Classifier Strictness",
+    description: "Last 7 days: per-source relevant rate, rejected docs that name landlord/tenant terms, and a fresh classifier verdict on 20 of them.",
+    path: "/admin/relevance-audit?days=7&recheck=20",
+    icon: "🔎",
+    view: true,
+  },
+  {
     key: "reenrich",
     label: "Re-run Dropped Docs",
     description: "Re-enrich docs a run dropped as unparseable (paste the ids from the red run alert). Shows relevant / irrelevant / why it failed again.",
