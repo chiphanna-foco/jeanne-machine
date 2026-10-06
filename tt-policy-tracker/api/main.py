@@ -38,6 +38,80 @@ STATE_NAMES = {
 }
 
 
+# Idempotent column-level migrations for changes Base.metadata.create_all
+# won't apply to existing tables. Each runs in its own transaction, so one
+# failure can't skip the rest (on 2026-10-06 a single swallowed failure left
+# raw_document.parse_failures missing and every ingest and enrich query broke).
+SCHEMA_MIGRATIONS: list[tuple[str, str]] = [
+    ("raw_document.classified_at",
+     "ALTER TABLE raw_document ADD COLUMN IF NOT EXISTS classified_at TIMESTAMPTZ"),
+    # Backfill: any raw_document that already has a policy_item was
+    # successfully classified at some point. Mark it so we don't re-
+    # classify it. Rejected docs we never tracked will get one final
+    # re-classification pass (and then be permanently marked).
+    ("raw_document.classified_at backfill",
+     "UPDATE raw_document "
+     "SET classified_at = COALESCE(classified_at, CURRENT_TIMESTAMP) "
+     "WHERE id IN (SELECT raw_document_id FROM policy_item) "
+     "AND classified_at IS NULL"),
+    ("policy_item.effective_alert_sent_at",
+     "ALTER TABLE policy_item ADD COLUMN IF NOT EXISTS effective_alert_sent_at TIMESTAMPTZ"),
+    ("raw_document.parse_failures",
+     "ALTER TABLE raw_document ADD COLUMN IF NOT EXISTS parse_failures INTEGER NOT NULL DEFAULT 0"),
+]
+
+# Result of the last migration pass, reported by /health and /admin/migrate.
+_migration_status: dict = {"ok": None, "ran_at": None, "steps": []}
+
+
+def run_schema_migrations(attempts: int = 3, lock_timeout_s: int = 10) -> dict:
+    """Apply SCHEMA_MIGRATIONS, each in its own transaction, and record the result.
+
+    ALTER TABLE needs an exclusive lock, so a step is bounded by lock_timeout
+    and retried rather than hanging startup behind a long-running query.
+    """
+    import time
+
+    global _migration_status
+    steps: list[dict] = []
+    sync_engine = create_engine(settings.sync_database_url)
+    try:
+        plan = [
+            ("vector extension", "CREATE EXTENSION IF NOT EXISTS vector"),
+            ("create_all", None),
+            *SCHEMA_MIGRATIONS,
+        ]
+        for name, sql in plan:
+            error = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    if sql is None:
+                        Base.metadata.create_all(sync_engine)
+                    else:
+                        with sync_engine.begin() as conn:
+                            conn.execute(text(f"SET LOCAL lock_timeout = '{lock_timeout_s}s'"))
+                            conn.execute(text(sql))
+                    error = None
+                    break
+                except Exception as e:
+                    error = f"{type(e).__name__}: {str(e)[:300]}"
+                    logger.warning(f"Migration '{name}' attempt {attempt}/{attempts} failed: {error}")
+                    if attempt < attempts:
+                        time.sleep(2 * attempt)
+            steps.append({"step": name, "ok": error is None, **({"error": error} if error else {})})
+    finally:
+        sync_engine.dispose()
+    # The vector extension may be unavailable to this role; only the
+    # table/column steps decide whether the schema matches the code.
+    ok = all(s["ok"] for s in steps if s["step"] != "vector extension")
+    _migration_status = {"ok": ok, "ran_at": datetime.utcnow().isoformat(), "steps": steps}
+    if ok:
+        logger.info("Database tables ready")
+    else:
+        logger.error(f"Schema migration incomplete: {[s for s in steps if not s['ok']]}")
+    return _migration_status
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run DB migrations / table creation on startup."""
@@ -48,41 +122,9 @@ async def lifespan(app: FastAPI):
             "ANTHROPIC_API_KEY is not set: enrichment will fail and docs stay queued"
         )
     try:
-        sync_engine = create_engine(settings.sync_database_url)
-        with sync_engine.connect() as conn:
-            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-            conn.commit()
-        Base.metadata.create_all(sync_engine)
-        # Idempotent column-level migrations for changes Base.metadata.create_all
-        # won't apply to existing tables.
-        with sync_engine.connect() as conn:
-            conn.execute(text(
-                "ALTER TABLE raw_document "
-                "ADD COLUMN IF NOT EXISTS classified_at TIMESTAMPTZ"
-            ))
-            # Backfill: any raw_document that already has a policy_item was
-            # successfully classified at some point. Mark it so we don't re-
-            # classify it. Rejected docs we never tracked will get one final
-            # re-classification pass (and then be permanently marked).
-            conn.execute(text(
-                "UPDATE raw_document "
-                "SET classified_at = COALESCE(classified_at, CURRENT_TIMESTAMP) "
-                "WHERE id IN (SELECT raw_document_id FROM policy_item) "
-                "AND classified_at IS NULL"
-            ))
-            conn.execute(text(
-                "ALTER TABLE policy_item "
-                "ADD COLUMN IF NOT EXISTS effective_alert_sent_at TIMESTAMPTZ"
-            ))
-            conn.execute(text(
-                "ALTER TABLE raw_document "
-                "ADD COLUMN IF NOT EXISTS parse_failures INTEGER NOT NULL DEFAULT 0"
-            ))
-            conn.commit()
-        sync_engine.dispose()
-        logger.info("Database tables ready")
+        run_schema_migrations()
     except Exception as e:
-        logger.warning(f"Auto-migration on startup failed (ok if tables exist): {e}")
+        logger.error(f"Auto-migration on startup failed: {e}")
     yield
 
 
@@ -124,6 +166,8 @@ async def health():
         "synthesizer_model": settings.law_synth_model,
         "drafter_model": settings.drafter_model,
         "anthropic_key_configured": bool(settings.anthropic_api_key),
+        # False means the DB is missing a column the code reads; runs will fail.
+        "schema_ok": _migration_status["ok"],
     }
 
 
@@ -811,6 +855,15 @@ async def _run_pipeline_task(
 
     results = {"ingested": 0, "enriched": 0, **new_run_counters(), "errors": []}
     new_item_ids: list[int] = []
+
+    # Self-heal: if startup left the schema behind the code, every query below
+    # fails. Retry the migrations before giving up on the run.
+    if _migration_status["ok"] is not True:
+        status = await asyncio.to_thread(run_schema_migrations)
+        if not status["ok"]:
+            results["errors"].extend(
+                f"schema migration {s['step']}: {s['error']}" for s in status["steps"] if not s["ok"]
+            )
 
     try:
         # ── Step 1: Ingest ──
@@ -2157,6 +2210,17 @@ async def reset_raw_documents(
 
 
 # ── Cron: Daily Pipeline ──────────────────────────────────────────
+
+
+@app.get("/admin/migrate")
+async def admin_migrate(token: str | None = Query(default=None)):
+    """Re-run the idempotent schema migrations and report each step.
+
+    Startup runs these too; use this when /health shows schema_ok false.
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+    return await asyncio.to_thread(run_schema_migrations)
 
 
 @app.get("/admin/cron-daily")
