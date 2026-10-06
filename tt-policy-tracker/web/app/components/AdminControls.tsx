@@ -203,6 +203,14 @@ const ACTIONS: Action[] = [
     ask: { name: "external_id", prompt: "External ids to re-run (comma-separated):" },
   },
   {
+    key: "migrate",
+    label: "Fix Database Columns",
+    description: "Re-run the database column updates and show each step. Use when runs fail with \"column ... does not exist\".",
+    path: "/admin/migrate",
+    icon: "🧱",
+    view: true,
+  },
+  {
     key: "probe-co-bill",
     label: "Probe OpenStates (CO HB26-1196)",
     description: "Ask OpenStates directly what it has for a state/bill — distinguishes a source-coverage gap from an ingestion miss.",
