@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
@@ -1973,6 +1974,100 @@ async def admin_reenrich(
             entry = {"result": "irrelevant"}
         out.append({"external_id": ext_id, **entry})
     return {"docs": out}
+
+
+# Words that make a rejected doc worth a second look: a doc mentioning these
+# near the top is plausibly a landlord-tenant bill. Narrower than the keyword
+# prescreen, which also matches "housing", "premises" and the like.
+_RELEVANCE_AUDIT_RE = re.compile(
+    r"\b(landlord|tenan|evict|security deposit|lease|rental|rent control|rent increase)",
+    re.IGNORECASE,
+)
+
+
+@app.get("/admin/relevance-audit")
+async def relevance_audit(
+    days: int = Query(default=7, ge=1, le=60),
+    recheck: int = Query(default=0, ge=0, le=30),
+    token: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Is the classifier rejecting too much? Read-only.
+
+    For docs classified in the last `days`: per source, how many were
+    classified and how many became items. Rejected docs whose first 600
+    characters name a landlord-tenant term are counted and sampled.
+    `recheck=N` re-runs the classifier on N of those (no writes) and shows
+    each verdict, to tell a strict classifier from noisy input.
+
+      GET /admin/relevance-audit?days=7&recheck=20&token=...
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+
+    from enrichment.classifier import classify_document
+    from storage.models import SourceAdapter
+
+    since = datetime.utcnow() - timedelta(days=days)
+    rows = (
+        await session.execute(
+            select(
+                SourceAdapter.name,
+                RawDocument.external_id,
+                RawDocument.raw_text,
+                PolicyItem.id,
+            )
+            .join(SourceAdapter, SourceAdapter.id == RawDocument.source_adapter_id)
+            .outerjoin(PolicyItem, PolicyItem.raw_document_id == RawDocument.id)
+            .where(RawDocument.classified_at >= since)
+        )
+    ).all()
+
+    by_source: dict[str, dict] = {}
+    suspects: list[tuple[str, str, str]] = []
+    for source, ext_id, raw_text, item_id in rows:
+        b = by_source.setdefault(
+            source, {"classified": 0, "relevant": 0, "rejected_with_lt_terms": 0}
+        )
+        b["classified"] += 1
+        if item_id is not None:
+            b["relevant"] += 1
+            continue
+        head = (raw_text or "")[:600]
+        if _RELEVANCE_AUDIT_RE.search(head):
+            b["rejected_with_lt_terms"] += 1
+            suspects.append((source, ext_id, raw_text or ""))
+
+    def first_line(t: str) -> str:
+        return (t.strip().splitlines() or [""])[0][:160]
+
+    rechecked = []
+    for source, ext_id, raw_text in suspects[:recheck]:
+        try:
+            verdict = await classify_document(raw_text)
+            rechecked.append({
+                "external_id": ext_id, "source": source, "title": first_line(raw_text),
+                "relevant": verdict["relevant"], "confidence": verdict["confidence"],
+                "funding_only": verdict["funding_only"],
+            })
+        except (EnrichmentAPIError, EnrichmentParseError) as e:
+            rechecked.append({"external_id": ext_id, "source": source, "error": str(e)[:200]})
+
+    total = sum(b["classified"] for b in by_source.values())
+    relevant = sum(b["relevant"] for b in by_source.values())
+    return {
+        "days": days,
+        "classified": total,
+        "relevant": relevant,
+        "relevant_pct": round(100 * relevant / total, 2) if total else None,
+        "relevance_threshold": settings.relevance_confidence_threshold,
+        "by_source": dict(sorted(by_source.items(), key=lambda kv: -kv[1]["classified"])),
+        "rejected_with_lt_terms": len(suspects),
+        "rejected_sample": [
+            {"external_id": e, "source": s, "title": first_line(t)} for s, e, t in suspects[:25]
+        ],
+        "rechecked": rechecked,
+    }
 
 
 @app.get("/admin/legiscan-trace")
