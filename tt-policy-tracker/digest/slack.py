@@ -27,9 +27,14 @@ MAX_TEXT_LENGTH = 2800
 
 # Compact digest caps \u2014 a national-search backfill week can produce 100+
 # items; the digest lists at most this many lines per bucket and points to
-# the dashboard for the rest. FYI items are never listed, only counted.
+# the dashboard for the rest. FYI items are counted, except a few
+# medium/high-impact ones listed under "Worth watching": in the legislative
+# off-season nearly everything is early-stage FYI, and without this the
+# digest goes empty while bills legal would want to see early sit unlisted.
 DIGEST_ACT_NOW_LINES = 15
 DIGEST_MONITOR_LINES = 10
+DIGEST_WATCH_LINES = 5
+WATCH_IMPACTS = ("high", "med")
 DASHBOARD_URL = "https://jeanne-machine.vercel.app"
 
 
@@ -87,7 +92,8 @@ def build_compact_digest_blocks(
     suppressed: int = 0,
     dashboard_url: str = DASHBOARD_URL,
 ) -> list[dict]:
-    """Compact digest: one line per bill, act-now first, FYI as a count only.
+    """Compact digest: one line per bill, act-now first, then monitor, then up
+    to DIGEST_WATCH_LINES medium/high-impact FYI bills; other FYI as a count.
 
     `triaged` is enrichment.triage.triage() output:
     {act_now, monitor, fyi, counts, deduped_removed}. Summaries and impact
@@ -98,6 +104,9 @@ def build_compact_digest_blocks(
     act_now = triaged.get("act_now", [])
     monitor = triaged.get("monitor", [])
     fyi_count = counts.get("fyi", len(triaged.get("fyi", [])))
+    # triage() sorts fyi by impact, high first, so this keeps the biggest.
+    watch = [it for it in triaged.get("fyi", []) if it.get("impact_score") in WATCH_IMPACTS]
+    watch = watch[:DIGEST_WATCH_LINES]
     total = len(act_now) + len(monitor) + fyi_count
 
     meta_bits = [date_range, f"{total} item{'s' if total != 1 else ''}"]
@@ -134,13 +143,17 @@ def build_compact_digest_blocks(
     for label, items, cap in (
         ("⚠️ Act now", act_now, DIGEST_ACT_NOW_LINES),
         ("👁️ Monitor", monitor, DIGEST_MONITOR_LINES),
+        ("🔭 Worth watching", watch, DIGEST_WATCH_LINES),
     ):
         if not items:
             continue
+        heading = f"*{label} ({len(items)})*"
+        if items is watch:
+            heading = f"*{label}* · _early-stage, but a big deal if it moves_"
         blocks.append(
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*{label} ({len(items)})*"},
+                "text": {"type": "mrkdwn", "text": heading},
             }
         )
         blocks.extend(_lines_to_sections([_digest_line(it) for it in items[:cap]]))
@@ -160,8 +173,13 @@ def build_compact_digest_blocks(
         blocks.append({"type": "divider"})
 
     footer_bits = []
-    if fyi_count:
-        footer_bits.append(f"ℹ️ {fyi_count} FYI item{'s' if fyi_count != 1 else ''} (early-stage / dead / niche) tracked but not listed")
+    unlisted_fyi = fyi_count - len(watch)
+    if unlisted_fyi > 0:
+        other = "other " if watch else ""
+        footer_bits.append(
+            f"ℹ️ {unlisted_fyi} {other}FYI item{'s' if unlisted_fyi != 1 else ''} "
+            "(early-stage / dead / niche) tracked but not listed"
+        )
     footer_bits.append(f"<{dashboard_url}|dashboard>")
     blocks.append(
         {

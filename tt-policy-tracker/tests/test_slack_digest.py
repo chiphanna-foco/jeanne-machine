@@ -15,6 +15,7 @@ from datetime import datetime
 from digest.slack import (
     DIGEST_ACT_NOW_LINES,
     DIGEST_MONITOR_LINES,
+    DIGEST_WATCH_LINES,
     MAX_BLOCKS,
     _digest_line,
     build_compact_digest_blocks,
@@ -43,7 +44,11 @@ def all_text(blocks: list[dict]) -> str:
 
 
 def test_one_line_per_bill_no_summaries():
-    items = [make_item(1, "urgent"), make_item(2, "monitor"), make_item(3, "inform")]
+    items = [
+        make_item(1, "urgent"),
+        make_item(2, "monitor"),
+        make_item(3, "inform", impact_score="low"),
+    ]
     triaged = triage(items, datetime(2026, 6, 13))
     blocks = build_compact_digest_blocks(triaged, "weekly", "Jun 06 – Jun 13, 2026")
 
@@ -53,9 +58,41 @@ def test_one_line_per_bill_no_summaries():
     assert "Bill number 2" in text
     assert "long summary" not in text
     assert "REASONING_SENTINEL" not in text
-    # fyi items are counted, not listed
+    # low-impact fyi items are counted, not listed
     assert "Bill number 3" not in text
     assert "1 FYI item" in text
+    assert "Worth watching" not in text
+
+
+def test_worth_watching_lists_top_med_high_fyi():
+    # Off-season shape: nothing urgent or moving, a pile of early-stage bills.
+    items = (
+        [make_item(i, "inform", impact_score="med") for i in range(1, 4)]
+        + [make_item(10 + i, "inform", impact_score="high") for i in range(1, 5)]
+        + [make_item(20 + i, "inform", impact_score="low") for i in range(1, 9)]
+    )
+    triaged = triage(items, datetime(2026, 6, 13))
+    blocks = build_compact_digest_blocks(triaged, "weekly", "Jun 06 – Jun 13, 2026")
+
+    text = all_text(blocks)
+    assert "Worth watching" in text
+    listed = [i for i in range(1, 29) if f"Bill number {i} " in text]
+    assert len(listed) == DIGEST_WATCH_LINES
+    # all 4 high-impact bills make the cut before any med one
+    assert all(f"Bill number {10 + i} " in text for i in range(1, 5))
+    assert not any(f"Bill number {20 + i} " in text for i in range(1, 9))
+    # 15 fyi total, 5 listed
+    assert "10 other FYI items" in text
+    assert "15 items" in text
+
+
+def test_worth_watching_absent_when_all_fyi_low():
+    items = [make_item(i, "inform", impact_score="low") for i in range(5)]
+    triaged = triage(items, datetime(2026, 6, 13))
+    text = all_text(build_compact_digest_blocks(triaged, "weekly", "Jun 06 – Jun 13, 2026"))
+    assert "Worth watching" not in text
+    assert "5 FYI items" in text
+    assert "other" not in text
 
 
 def test_buckets_capped_with_overflow_note():
@@ -103,7 +140,7 @@ def test_empty_digest():
 
 
 def test_header_context_includes_counts_and_suppressed():
-    items = [make_item(1, "urgent"), make_item(2, "inform")]
+    items = [make_item(1, "urgent"), make_item(2, "inform", impact_score="low")]
     triaged = triage(items, datetime(2026, 6, 13))
     blocks = build_compact_digest_blocks(
         triaged, "weekly", "Jun 06 – Jun 13, 2026", suppressed=3
