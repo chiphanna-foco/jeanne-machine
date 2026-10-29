@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+from enrichment.sessions import session_over
 from storage.models import ItemFeedback, PolicyItem, SlackPost, Subscription
 
 logger = logging.getLogger(__name__)
@@ -91,9 +92,11 @@ def build_compact_digest_blocks(
     date_range: str,
     suppressed: int = 0,
     dashboard_url: str = DASHBOARD_URL,
+    today: datetime | None = None,
 ) -> list[dict]:
     """Compact digest: one line per bill, act-now first, then monitor, then up
-    to DIGEST_WATCH_LINES medium/high-impact FYI bills; other FYI as a count.
+    to DIGEST_WATCH_LINES medium/high-impact FYI bills whose session is still
+    open (a pending bill in an adjourned session is dead); other FYI as a count.
 
     `triaged` is enrichment.triage.triage() output:
     {act_now, monitor, fyi, counts, deduped_removed}. Summaries and impact
@@ -105,7 +108,12 @@ def build_compact_digest_blocks(
     monitor = triaged.get("monitor", [])
     fyi_count = counts.get("fyi", len(triaged.get("fyi", [])))
     # triage() sorts fyi by impact, high first, so this keeps the biggest.
-    watch = [it for it in triaged.get("fyi", []) if it.get("impact_score") in WATCH_IMPACTS]
+    today = today or datetime.utcnow()
+    watch = [
+        it
+        for it in triaged.get("fyi", [])
+        if it.get("impact_score") in WATCH_IMPACTS and not session_over(it.get("source_url"), today)
+    ]
     watch = watch[:DIGEST_WATCH_LINES]
     total = len(act_now) + len(monitor) + fyi_count
 

@@ -163,3 +163,21 @@ def test_digest_line_format():
     assert "*CO HB1045*" in line
     assert "<https://legiscan.com/CO/bill/HB1045/2026|Colorado caps deposits>" in line
     assert "effective 2026-09-01" in line
+
+
+def test_worth_watching_skips_bills_from_adjourned_sessions():
+    items = [
+        make_item(1, "inform", source_url="https://openstates.org/ia/bills/2025-2026/SF2225/"),
+        make_item(2, "inform", source_url="https://openstates.org/va/bills/2027/HB79/"),
+        make_item(3, "inform", source_url="https://openstates.org/pa/bills/2025-2026/HB1705/"),
+    ]
+    triaged = triage(items, datetime(2026, 10, 29))
+    blocks = build_compact_digest_blocks(
+        triaged, "weekly", "Oct 26 – Oct 29, 2026", today=datetime(2026, 10, 29)
+    )
+    text = all_text(blocks)
+    assert "Bill number 1 " not in text  # Iowa session adjourned
+    assert "Bill number 2 " in text
+    assert "Bill number 3 " in text
+    # the dead bill still counts toward the FYI total
+    assert "1 other FYI item " in text
