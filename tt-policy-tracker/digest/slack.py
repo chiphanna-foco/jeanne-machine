@@ -35,6 +35,7 @@ MAX_TEXT_LENGTH = 2800
 DIGEST_ACT_NOW_LINES = 15
 DIGEST_MONITOR_LINES = 10
 DIGEST_WATCH_LINES = 5
+DIGEST_QUIET_FYI_LINES = 3
 WATCH_IMPACTS = ("high", "med")
 DASHBOARD_URL = "https://jeanne-machine.vercel.app"
 
@@ -116,6 +117,16 @@ def build_compact_digest_blocks(
     ]
     watch = watch[:DIGEST_WATCH_LINES]
     total = len(act_now) + len(monitor) + fyi_count
+    # Quiet week: nothing to act on or monitor. Say so plainly, and never post
+    # a digest that is only a count — fall back to the top few FYI items
+    # (open sessions first, then anything) so there is always something to read.
+    quiet = not act_now and not monitor and fyi_count > 0
+    watch_label = "🔭 Worth watching"
+    if quiet and not watch:
+        fyi = triaged.get("fyi", [])
+        open_fyi = [it for it in fyi if not session_over(it.get("source_url"), today)]
+        watch = (open_fyi or fyi)[:DIGEST_QUIET_FYI_LINES]
+        watch_label = "ℹ️ Top FYI items"
 
     meta_bits = [date_range, f"{total} item{'s' if total != 1 else ''}"]
     removed = triaged.get("deduped_removed", 0)
@@ -148,16 +159,32 @@ def build_compact_digest_blocks(
         )
         return blocks
 
+    if quiet:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "✅ *Nothing needs action this period.* No bills to act on or monitor; "
+                    "everything new is early-stage or informational.",
+                },
+            }
+        )
+
     for label, items, cap in (
         ("⚠️ Act now", act_now, DIGEST_ACT_NOW_LINES),
         ("👁️ Monitor", monitor, DIGEST_MONITOR_LINES),
-        ("🔭 Worth watching", watch, DIGEST_WATCH_LINES),
+        (watch_label, watch, DIGEST_WATCH_LINES),
     ):
         if not items:
             continue
         heading = f"*{label} ({len(items)})*"
         if items is watch:
-            heading = f"*{label}* · _early-stage, but a big deal if it moves_"
+            heading = (
+                f"*{label}* · _early-stage, but a big deal if it moves_"
+                if label == "🔭 Worth watching"
+                else f"*{label}* · _for context, nothing to do yet_"
+            )
         blocks.append(
             {
                 "type": "section",

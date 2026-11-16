@@ -87,12 +87,13 @@ def test_worth_watching_lists_top_med_high_fyi():
 
 
 def test_worth_watching_absent_when_all_fyi_low():
-    items = [make_item(i, "inform", impact_score="low") for i in range(5)]
+    # With something to act on, low-impact FYI stays a count (no quiet fallback).
+    items = [make_item(99, "urgent")] + [make_item(i, "inform", impact_score="low") for i in range(5)]
     triaged = triage(items, datetime(2026, 6, 13))
     text = all_text(build_compact_digest_blocks(triaged, "weekly", "Jun 06 – Jun 13, 2026"))
     assert "Worth watching" not in text
     assert "5 FYI items" in text
-    assert "other" not in text
+    assert "other FYI" not in text
 
 
 def test_buckets_capped_with_overflow_note():
@@ -181,3 +182,47 @@ def test_worth_watching_skips_bills_from_adjourned_sessions():
     assert "Bill number 3 " in text
     # the dead bill still counts toward the FYI total
     assert "1 other FYI item " in text
+
+
+def test_quiet_week_says_so_and_still_lists_top_fyi():
+    # Nov 12-16 2026 shape: 55 items, all low-impact FYI. The digest used to be
+    # a single count line; it must say nothing needs action and list a few.
+    items = [make_item(i, "inform", impact_score="low") for i in range(1, 56)]
+    triaged = triage(items, datetime(2026, 11, 16))
+    text = all_text(
+        build_compact_digest_blocks(triaged, "weekly", "Nov 12 – Nov 16, 2026", today=datetime(2026, 11, 16))
+    )
+    assert "Nothing needs action this period" in text
+    assert "Top FYI items" in text
+    assert sum(f"Bill number {i} " in text for i in range(1, 56)) == 3
+    assert "52 other FYI items" in text
+
+
+def test_quiet_week_prefers_worth_watching_over_top_fyi():
+    items = [make_item(1, "inform", impact_score="med")] + [
+        make_item(i, "inform", impact_score="low") for i in range(2, 6)
+    ]
+    triaged = triage(items, datetime(2026, 6, 13))
+    text = all_text(build_compact_digest_blocks(triaged, "weekly", "Jun 06 – Jun 13, 2026"))
+    assert "Nothing needs action this period" in text
+    assert "Worth watching" in text
+    assert "Top FYI items" not in text
+
+
+def test_quiet_fallback_skips_dead_sessions_when_it_can():
+    dead = "https://openstates.org/ia/bills/2025-2026/SF{}/"
+    items = [make_item(i, "inform", impact_score="low", source_url=dead.format(i)) for i in range(1, 5)]
+    items.append(make_item(9, "inform", impact_score="low", source_url="https://openstates.org/va/bills/2027/HB79/"))
+    triaged = triage(items, datetime(2026, 11, 16))
+    text = all_text(
+        build_compact_digest_blocks(triaged, "weekly", "Nov 12 – Nov 16, 2026", today=datetime(2026, 11, 16))
+    )
+    assert "Bill number 9 " in text
+    assert not any(f"Bill number {i} " in text for i in range(1, 5))
+
+
+def test_no_quiet_banner_when_something_to_act_on():
+    items = [make_item(1, "urgent"), make_item(2, "inform", impact_score="low")]
+    text = all_text(build_compact_digest_blocks(triage(items, datetime(2026, 6, 13)), "weekly", "x"))
+    assert "Nothing needs action" not in text
+    assert "Top FYI items" not in text
