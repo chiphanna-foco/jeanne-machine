@@ -15,6 +15,7 @@ from datetime import datetime
 from digest.slack import (
     DIGEST_ACT_NOW_LINES,
     DIGEST_MONITOR_LINES,
+    DIGEST_WATCH_LINES,
     MAX_BLOCKS,
     _digest_line,
     build_compact_digest_blocks,
@@ -43,7 +44,11 @@ def all_text(blocks: list[dict]) -> str:
 
 
 def test_one_line_per_bill_no_summaries():
-    items = [make_item(1, "urgent"), make_item(2, "monitor"), make_item(3, "inform")]
+    items = [
+        make_item(1, "urgent"),
+        make_item(2, "monitor"),
+        make_item(3, "inform", impact_score="low"),
+    ]
     triaged = triage(items, datetime(2026, 6, 13))
     blocks = build_compact_digest_blocks(triaged, "weekly", "Jun 06 – Jun 13, 2026")
 
@@ -53,9 +58,42 @@ def test_one_line_per_bill_no_summaries():
     assert "Bill number 2" in text
     assert "long summary" not in text
     assert "REASONING_SENTINEL" not in text
-    # fyi items are counted, not listed
+    # low-impact fyi items are counted, not listed
     assert "Bill number 3" not in text
     assert "1 FYI item" in text
+    assert "Worth watching" not in text
+
+
+def test_worth_watching_lists_top_med_high_fyi():
+    # Off-season shape: nothing urgent or moving, a pile of early-stage bills.
+    items = (
+        [make_item(i, "inform", impact_score="med") for i in range(1, 4)]
+        + [make_item(10 + i, "inform", impact_score="high") for i in range(1, 5)]
+        + [make_item(20 + i, "inform", impact_score="low") for i in range(1, 9)]
+    )
+    triaged = triage(items, datetime(2026, 6, 13))
+    blocks = build_compact_digest_blocks(triaged, "weekly", "Jun 06 – Jun 13, 2026")
+
+    text = all_text(blocks)
+    assert "Worth watching" in text
+    listed = [i for i in range(1, 29) if f"Bill number {i} " in text]
+    assert len(listed) == DIGEST_WATCH_LINES
+    # all 4 high-impact bills make the cut before any med one
+    assert all(f"Bill number {10 + i} " in text for i in range(1, 5))
+    assert not any(f"Bill number {20 + i} " in text for i in range(1, 9))
+    # 15 fyi total, 5 listed
+    assert "10 other FYI items" in text
+    assert "15 items" in text
+
+
+def test_worth_watching_absent_when_all_fyi_low():
+    # With something to act on, low-impact FYI stays a count (no quiet fallback).
+    items = [make_item(99, "urgent")] + [make_item(i, "inform", impact_score="low") for i in range(5)]
+    triaged = triage(items, datetime(2026, 6, 13))
+    text = all_text(build_compact_digest_blocks(triaged, "weekly", "Jun 06 – Jun 13, 2026"))
+    assert "Worth watching" not in text
+    assert "5 FYI items" in text
+    assert "other FYI" not in text
 
 
 def test_buckets_capped_with_overflow_note():
@@ -103,7 +141,7 @@ def test_empty_digest():
 
 
 def test_header_context_includes_counts_and_suppressed():
-    items = [make_item(1, "urgent"), make_item(2, "inform")]
+    items = [make_item(1, "urgent"), make_item(2, "inform", impact_score="low")]
     triaged = triage(items, datetime(2026, 6, 13))
     blocks = build_compact_digest_blocks(
         triaged, "weekly", "Jun 06 – Jun 13, 2026", suppressed=3
@@ -126,3 +164,65 @@ def test_digest_line_format():
     assert "*CO HB1045*" in line
     assert "<https://legiscan.com/CO/bill/HB1045/2026|Colorado caps deposits>" in line
     assert "effective 2026-09-01" in line
+
+
+def test_worth_watching_skips_bills_from_adjourned_sessions():
+    items = [
+        make_item(1, "inform", source_url="https://openstates.org/ia/bills/2025-2026/SF2225/"),
+        make_item(2, "inform", source_url="https://openstates.org/va/bills/2027/HB79/"),
+        make_item(3, "inform", source_url="https://openstates.org/pa/bills/2025-2026/HB1705/"),
+    ]
+    triaged = triage(items, datetime(2026, 10, 29))
+    blocks = build_compact_digest_blocks(
+        triaged, "weekly", "Oct 26 – Oct 29, 2026", today=datetime(2026, 10, 29)
+    )
+    text = all_text(blocks)
+    assert "Bill number 1 " not in text  # Iowa session adjourned
+    assert "Bill number 2 " in text
+    assert "Bill number 3 " in text
+    # the dead bill still counts toward the FYI total
+    assert "1 other FYI item " in text
+
+
+def test_quiet_week_says_so_and_still_lists_top_fyi():
+    # Nov 12-16 2026 shape: 55 items, all low-impact FYI. The digest used to be
+    # a single count line; it must say nothing needs action and list a few.
+    items = [make_item(i, "inform", impact_score="low") for i in range(1, 56)]
+    triaged = triage(items, datetime(2026, 11, 16))
+    text = all_text(
+        build_compact_digest_blocks(triaged, "weekly", "Nov 12 – Nov 16, 2026", today=datetime(2026, 11, 16))
+    )
+    assert "Nothing needs action this period" in text
+    assert "Top FYI items" in text
+    assert sum(f"Bill number {i} " in text for i in range(1, 56)) == 3
+    assert "52 other FYI items" in text
+
+
+def test_quiet_week_prefers_worth_watching_over_top_fyi():
+    items = [make_item(1, "inform", impact_score="med")] + [
+        make_item(i, "inform", impact_score="low") for i in range(2, 6)
+    ]
+    triaged = triage(items, datetime(2026, 6, 13))
+    text = all_text(build_compact_digest_blocks(triaged, "weekly", "Jun 06 – Jun 13, 2026"))
+    assert "Nothing needs action this period" in text
+    assert "Worth watching" in text
+    assert "Top FYI items" not in text
+
+
+def test_quiet_fallback_skips_dead_sessions_when_it_can():
+    dead = "https://openstates.org/ia/bills/2025-2026/SF{}/"
+    items = [make_item(i, "inform", impact_score="low", source_url=dead.format(i)) for i in range(1, 5)]
+    items.append(make_item(9, "inform", impact_score="low", source_url="https://openstates.org/va/bills/2027/HB79/"))
+    triaged = triage(items, datetime(2026, 11, 16))
+    text = all_text(
+        build_compact_digest_blocks(triaged, "weekly", "Nov 12 – Nov 16, 2026", today=datetime(2026, 11, 16))
+    )
+    assert "Bill number 9 " in text
+    assert not any(f"Bill number {i} " in text for i in range(1, 5))
+
+
+def test_no_quiet_banner_when_something_to_act_on():
+    items = [make_item(1, "urgent"), make_item(2, "inform", impact_score="low")]
+    text = all_text(build_compact_digest_blocks(triage(items, datetime(2026, 6, 13)), "weekly", "x"))
+    assert "Nothing needs action" not in text
+    assert "Top FYI items" not in text
