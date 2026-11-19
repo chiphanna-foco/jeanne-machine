@@ -1,9 +1,9 @@
 # Daily LegiScan full-text search sweep — the recall-first discovery loop.
 # Once a day: bills rarely change intra-day and LegiScan's free key allows only
-# 30,000 queries/month (overage SUSPENDS the account, and extra keys are
-# forbidden). At 16 standing queries + up to 300 getBill per run, an every-2h
-# cadence (12x/day) blew the monthly budget; daily keeps the worst case ~10x
-# under it while still surfacing new bills within a day. The endpoint skips
+# 10,000 queries/month since 2026-10-01 (going over blocks all bill data until
+# the 1st, and extra keys are forbidden). The daily pipeline also runs the
+# search adapter; it reuses this sweep's cached search results, and both only
+# getBill bills whose change_hash moved. See /admin/legiscan-usage. The endpoint skips
 # itself if a pipeline run is already in progress, so overlap can't pile up.
 # Requires repo secrets API_BASE_URL and ADMIN_TOKEN.
 name: Search sweep

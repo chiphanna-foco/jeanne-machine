@@ -85,9 +85,52 @@ class LegiScanApiError(Exception):
 class LegiScanBudgetExceeded(Exception):
     """Raised before a call when we've hit our self-imposed monthly ceiling.
 
-    Stops spend at ``settings.legiscan_monthly_budget`` so we never reach
-    LegiScan's hard 30,000/month limit (which suspends the account).
+    Stops spend at ``settings.legiscan_effective_budget`` so we never reach
+    LegiScan's hard monthly limit (10,000 on the free key since 2026-10-01).
     """
+
+
+class LegiScanQuotaExceeded(LegiScanApiError):
+    """LegiScan says the key is over its monthly query limit.
+
+    Every call after this one fails the same way until the 1st of next month,
+    and each failed call still counts against the key. So the adapter stops
+    calling for the rest of the run, and the caller marks the month as
+    exhausted so later runs don't call at all.
+    """
+
+
+# Phrases LegiScan uses in the alert message when the monthly limit is hit, e.g.
+# "API key has exceeded maximum query count for November 2026 (10,044 of
+# 10,000); limit resets December 1st".
+_QUOTA_PATTERNS = re.compile(
+    r"exceeded maximum query count|query (count|limit)|limit resets|over (the )?limit",
+    re.IGNORECASE,
+)
+
+
+def is_quota_message(message: str | None) -> bool:
+    """True when a LegiScan error message means the monthly limit is used up."""
+    return bool(message and _QUOTA_PATTERNS.search(message))
+
+
+def getbill_allowance(
+    budget_remaining: int | None,
+    days_left_in_month: int,
+    max_getbill: int,
+    reserve: int = 0,
+) -> int:
+    """How many getBill calls this run may spend.
+
+    Spreads what is left of the monthly budget evenly over the days left in the
+    month, so no single run (or a burst of manual runs) can spend next week's
+    queries. ``reserve`` is held back for this run's search queries.
+    """
+    if budget_remaining is None:
+        return max_getbill
+    spendable = max(0, budget_remaining - reserve)
+    per_day = spendable // max(1, days_left_in_month)
+    return max(0, min(max_getbill, per_day))
 
 
 def colorado_bill_id(number: str, year_start: int | None) -> str:
@@ -139,6 +182,15 @@ class LegiScanAdapter(BaseAdapter):
         # persist it back to the api_usage counter.
         self.budget_remaining = budget_remaining
         self.queries_used = 0
+        # Set when LegiScan answers "over the monthly limit" (or our own budget
+        # guard trips). After that, _get_json refuses without a network call.
+        self.quota_exhausted = False
+        self.quota_message: str | None = None
+        # Every getBill this run: {bill_id: change_hash}. The caller stores
+        # these in the legiscan_bill cache so the bill is not fetched again
+        # until its change_hash moves, even if ingest drops the doc as a
+        # content duplicate.
+        self.fetched_hashes: dict[int, str] = {}
         # Mirror openstates_by_state / wa_leg so the pipeline surfaces a
         # per-state breakdown under the "legiscan_by_state" key.
         self.last_run_stats: dict[str, dict] = {}
@@ -169,6 +221,10 @@ class LegiScanAdapter(BaseAdapter):
         since_date = since.date()
 
         for st in self.states:
+            if self.quota_exhausted:
+                stats[st] = {"list_status": "skipped", "listed": 0, "kept": 0,
+                             "error": f"skipped: {self.quota_message}"}
+                continue
             st_stats = {
                 "list_status": None, "listed": 0, "candidates": 0,
                 "fetched": 0, "skipped_unchanged": 0, "kept": 0,
@@ -214,12 +270,17 @@ class LegiScanAdapter(BaseAdapter):
                 try:
                     detail = await self._get_bill(bid)
                     st_stats["fetched"] += 1
+                except (LegiScanQuotaExceeded, LegiScanBudgetExceeded) as e:
+                    st_stats["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+                    break
                 except Exception as e:
                     st_stats["detail_err"] += 1
                     logger.error(
                         f"legiscan: getBill({bid}) failed: {type(e).__name__}: {str(e)[:150]}"
                     )
                     continue
+                if bid is not None:
+                    self.fetched_hashes[int(bid)] = change_hash or detail.get("change_hash") or ""
 
                 doc = self._normalize_detail(detail, st, year_start, change_hash)
                 if doc:
@@ -273,10 +334,16 @@ class LegiScanAdapter(BaseAdapter):
         # Self-imposed monthly budget guard: refuse to spend past our ceiling
         # so we never trip LegiScan's hard 30,000/month limit (which suspends
         # the account). Checked BEFORE the call so no quota is burned.
+        if self.quota_exhausted:
+            raise LegiScanQuotaExceeded(
+                f"skipped {params.get('op')}: {self.quota_message}"
+            )
         if (
             self.budget_remaining is not None
             and self.queries_used >= self.budget_remaining
         ):
+            self.quota_exhausted = True
+            self.quota_message = "our monthly LegiScan budget is used up"
             raise LegiScanBudgetExceeded(
                 f"LegiScan monthly budget reached "
                 f"({self.queries_used}/{self.budget_remaining} this window); "
@@ -308,9 +375,15 @@ class LegiScanAdapter(BaseAdapter):
                     # key), NOT a transient network fault — fail fast instead of
                     # retrying, which would only burn more quota on the same error.
                     alert = data.get("alert", {}) or {}
+                    message = alert.get("message", "no message")
+                    if is_quota_message(message):
+                        # Over the monthly limit: every further call fails the
+                        # same way AND still counts, so stop for the whole run.
+                        self.quota_exhausted = True
+                        self.quota_message = f"LegiScan monthly limit reached: {message[:160]}"
+                        raise LegiScanQuotaExceeded(self.quota_message)
                     raise LegiScanApiError(
-                        f"LegiScan status={status or 'UNKNOWN'}: "
-                        f"{alert.get('message', 'no message')}"
+                        f"LegiScan status={status or 'UNKNOWN'}: {message}"
                     )
                 return data
             except LegiScanApiError:

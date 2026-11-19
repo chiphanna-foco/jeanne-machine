@@ -4,6 +4,7 @@ from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
     Enum,
@@ -303,11 +304,13 @@ class SlackPost(Base):
 class ApiUsage(Base):
     """Monthly query counter for metered upstream APIs — a durable budget guard.
 
-    LegiScan's free key allows 30,000 queries/calendar-month and SUSPENDS the
-    account on overage (the email even forbids extra keys to bypass it). We
-    self-throttle well under that ceiling: one row per (provider, year, month)
+    LegiScan's free key allows 10,000 queries/calendar-month (30,000 until
+    2026-10-01) and blocks all bill data on overage (extra keys are forbidden).
+    We self-throttle under that ceiling: one row per (provider, year, month)
     holds the running query count, bumped after every sweep, and the LegiScan
-    adapters refuse to spend past ``settings.legiscan_monthly_budget``.
+    adapters refuse to spend past ``settings.legiscan_effective_budget``. When
+    LegiScan says we're over, the count is raised to the ceiling so later runs
+    skip LegiScan until the 1st.
 
     ``year``/``month`` are stored denormalized (UTC) so "this month's spend" is
     a trivial indexed lookup with no date math — same pattern as SlackPost's
@@ -329,3 +332,37 @@ class ApiUsage(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
+
+
+class LegiScanBill(Base):
+    """The change_hash of every LegiScan bill we have fetched with getBill.
+
+    The adapters skip getBill while a bill's current change_hash (from search
+    or masterlist) matches the one here. Written for every fetch, whether or
+    not ingest keeps the doc: ingest drops a doc whose text is unchanged, and
+    before this table existed that left the stored hash stale, so the same
+    bills were fetched again every run (~9,500 wasted queries in Nov 2026).
+    """
+
+    __tablename__ = "legiscan_bill"
+
+    bill_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    change_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class LegiScanSearchCache(Base):
+    """Latest getSearchRaw results per standing query.
+
+    Reused for ``settings.legiscan_search_cache_hours`` so the search sweep and
+    the daily pipeline don't both pay for the same 16 searches each day.
+    ``results`` is a list of {bill_id, change_hash, relevance}.
+    """
+
+    __tablename__ = "legiscan_search_cache"
+
+    query: Mapped[str] = mapped_column(Text, primary_key=True)
+    results: Mapped[list] = mapped_column(JSON, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

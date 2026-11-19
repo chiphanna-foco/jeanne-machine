@@ -51,8 +51,8 @@ class Settings(BaseSettings):
     # limit from 25 to 500). Works without a key at the lower limit.
     bls_api_key: str = ""
 
-    # LegiScan — free public API key from legiscan.com/legiscan (30,000
-    # queries/month, ~4x Open States' 250/day). Covers all 50 states + DC +
+    # LegiScan — free public API key from legiscan.com/legiscan. The free
+    # limit dropped from 30,000 to 10,000 queries/month on 2026-10-01. Covers all 50 states + DC +
     # Congress via one key. Used as the coverage-gap backstop for states whose
     # bills don't surface through Open States (e.g. Colorado / HB26-1196) and,
     # longer-term, as the primary low-quota multi-state source.
@@ -69,13 +69,22 @@ class Settings(BaseSettings):
     # Drop search hits below this LegiScan relevance score (0-100).
     legiscan_search_min_relevance: int = 50
     # Per-run cap on getBill detail fetches; overflow is logged and picked up
-    # next run (its change_hash stays unseen).
+    # next run (its change_hash stays unfetched). The real per-run allowance is
+    # usually lower: what is left of the month's budget / days left in month.
     legiscan_search_max_getbill: int = 300
-    # Self-imposed monthly query ceiling (defensive backstop). LegiScan's free
-    # key allows 30,000/calendar-month and SUSPENDS the account on overage (and
-    # forbids extra keys), so we stop well under it. Counts every LegiScan op
-    # across both adapters in the api_usage table; resets each calendar month.
-    legiscan_monthly_budget: int = 27000
+    # Reuse a standing query's search results for this long. The search sweep
+    # (06:15 UTC) and the daily pipeline (10:37 UTC) both run the search
+    # adapter; with this, only the first of them each day sends the searches.
+    legiscan_search_cache_hours: int = 20
+    # LegiScan's hard monthly limit for our key (free tier: 10,000 since
+    # 2026-10-01). Going over blocks all bill data until the 1st, and a second
+    # free key to get around it gets every key revoked.
+    legiscan_plan_limit: int = 10000
+    # Self-imposed monthly query ceiling. Counts every LegiScan op across both
+    # adapters in the api_usage table; resets each calendar month. The value
+    # actually used is legiscan_effective_budget (never above 85% of the plan
+    # limit, even if an old env var still says 27000).
+    legiscan_monthly_budget: int = 8000
 
     # Open States scope — "phase0" (OH + CO only) or "all" (all 50 states)
     openstates_scope: str = "all"
@@ -165,6 +174,12 @@ class Settings(BaseSettings):
     def legiscan_states_list(self) -> list[str]:
         """Lowercase two-letter states LegiScan handles directly (gap states)."""
         return [s.strip().lower() for s in self.legiscan_states.split(",") if s.strip()]
+
+    @property
+    def legiscan_effective_budget(self) -> int:
+        """Monthly LegiScan ceiling we enforce: the configured budget, clamped
+        to 85% of the plan limit so manual runs and probes keep headroom."""
+        return max(0, min(self.legiscan_monthly_budget, int(self.legiscan_plan_limit * 0.85)))
 
     @property
     def legiscan_search_queries_list(self) -> list[str]:

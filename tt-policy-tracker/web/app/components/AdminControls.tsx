@@ -186,6 +186,14 @@ const ACTIONS: Action[] = [
     view: true,
   },
   {
+    key: "legiscan-usage",
+    label: "Check LegiScan Usage",
+    description: "LegiScan queries used this month vs. the 10,000 free limit, whether LegiScan is paused, and today's search/bill caches.",
+    path: "/admin/legiscan-usage",
+    icon: "🧾",
+    view: true,
+  },
+  {
     key: "relevance-audit",
     label: "Check Classifier Strictness",
     description: "Last 7 days: per-source relevant rate, rejected docs that name landlord/tenant terms, and a fresh classifier verdict on 20 of them.",

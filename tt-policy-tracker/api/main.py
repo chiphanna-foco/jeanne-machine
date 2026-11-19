@@ -687,13 +687,14 @@ async def _enrich_queue(
 
 
 async def _legiscan_seen_change_hashes() -> dict[int, str]:
-    """Map {legiscan_bill_id: change_hash} from prior LegiScan raw docs.
+    """Map {legiscan_bill_id: change_hash} for every bill we've already fetched.
 
-    Lets LegiScanAdapter skip the getBill query for bills that haven't changed
-    since last run. Parsed from external_ids of the form
-    ``legiscan-{bill_id}-{change_hash}``.
+    The legiscan_bill table is the source of truth: it records the hash of
+    every getBill, whether or not ingest kept the doc. Older bills fetched
+    before that table existed fall back to the hash in their raw doc's
+    external_id (``legiscan-{bill_id}-{change_hash}``), newest doc winning.
     """
-    from storage.models import SourceAdapter
+    from storage.models import LegiScanBill, SourceAdapter
 
     seen: dict[int, str] = {}
     try:
@@ -705,57 +706,76 @@ async def _legiscan_seen_change_hashes() -> dict[int, str]:
                     )
                 )
             ).scalars().all()
-            if not sids:
-                return seen
-            rows = await session.execute(
-                select(RawDocument.external_id).where(
-                    RawDocument.source_adapter_id.in_(sids),
-                    RawDocument.external_id.like("legiscan-%"),
+            if sids:
+                rows = await session.execute(
+                    select(RawDocument.external_id)
+                    .where(
+                        RawDocument.source_adapter_id.in_(sids),
+                        RawDocument.external_id.like("legiscan-%"),
+                    )
+                    # Oldest first, so the newest doc's hash wins below.
+                    .order_by(RawDocument.fetched_at.asc(), RawDocument.id.asc())
                 )
+                for ext in rows.scalars().all():
+                    bid_str, _, ch = ext[len("legiscan-"):].partition("-")
+                    if bid_str.isdigit() and ch:
+                        seen[int(bid_str)] = ch
+            fetched = await session.execute(
+                select(LegiScanBill.bill_id, LegiScanBill.change_hash)
             )
-            for ext in rows.scalars().all():
-                bid_str, _, ch = ext[len("legiscan-"):].partition("-")
-                if bid_str.isdigit() and ch:
-                    seen[int(bid_str)] = ch
+            for bid, ch in fetched.all():
+                if ch:
+                    seen[bid] = ch
     except Exception as e:
         logger.warning(f"legiscan: could not load seen change_hashes: {e}")
     return seen
 
 
-async def _legiscan_budget_remaining() -> int:
-    """Queries left this UTC calendar month before our self-imposed ceiling.
-
-    LegiScan's free key allows 30,000/month and SUSPENDS the account on overage
-    (extra keys are forbidden), so we self-throttle at settings.legiscan_
-    monthly_budget. Returns the remaining headroom (0 if exhausted), read from
-    the durable api_usage counter.
-    """
+async def _legiscan_month_used() -> int:
+    """Queries we've counted against LegiScan this UTC calendar month."""
     from storage.models import ApiUsage
 
     now = datetime.utcnow()
-    try:
-        async with async_session() as session:
-            used = (
-                await session.execute(
-                    select(ApiUsage.query_count).where(
-                        ApiUsage.provider == "legiscan",
-                        ApiUsage.year == now.year,
-                        ApiUsage.month == now.month,
-                    )
+    async with async_session() as session:
+        return (
+            await session.execute(
+                select(ApiUsage.query_count).where(
+                    ApiUsage.provider == "legiscan",
+                    ApiUsage.year == now.year,
+                    ApiUsage.month == now.month,
                 )
-            ).scalar_one_or_none() or 0
+            )
+        ).scalar_one_or_none() or 0
+
+
+async def _legiscan_budget_remaining() -> int:
+    """Queries left this UTC calendar month before our self-imposed ceiling.
+
+    The free key allows 10,000/month (since 2026-10-01); going over blocks all
+    bill data until the 1st, and a second key to get around it gets every key
+    revoked. We stop at settings.legiscan_effective_budget. When LegiScan
+    itself says we're over, _legiscan_after_run marks the month used up, so
+    this returns 0 and later runs don't call at all.
+    """
+    try:
+        used = await _legiscan_month_used()
     except Exception as e:
-        # Fail OPEN (return full budget) rather than block ingestion if the
-        # counter read fails — the per-run max_getbill cap still bounds spend.
+        # Fail open rather than block ingestion; the per-run allowance (budget
+        # spread over the days left) and the quota stop still bound spend.
         logger.warning(f"legiscan: could not read monthly budget, assuming full: {e}")
-        return settings.legiscan_monthly_budget
-    return max(0, settings.legiscan_monthly_budget - used)
+        return settings.legiscan_effective_budget
+    return max(0, settings.legiscan_effective_budget - used)
 
 
 async def _record_legiscan_spend(n: int) -> None:
     """Add ``n`` queries to this UTC month's LegiScan counter (upsert)."""
     if n <= 0:
         return
+    await _bump_legiscan_counter(add=n)
+
+
+async def _bump_legiscan_counter(add: int = 0, at_least: int | None = None) -> None:
+    """Add to this month's LegiScan counter, or raise it to ``at_least``."""
     from storage.models import ApiUsage
 
     now = datetime.utcnow()
@@ -770,16 +790,145 @@ async def _record_legiscan_spend(n: int) -> None:
                     )
                 )
             ).scalar_one_or_none()
-            if row:
-                row.query_count += n
-            else:
-                session.add(ApiUsage(
-                    provider="legiscan", year=now.year, month=now.month,
-                    query_count=n,
+            if not row:
+                row = ApiUsage(provider="legiscan", year=now.year, month=now.month, query_count=0)
+                session.add(row)
+            row.query_count = (row.query_count or 0) + add
+            if at_least is not None:
+                row.query_count = max(row.query_count, at_least)
+            await session.commit()
+    except Exception as e:
+        logger.warning(f"legiscan: could not update the monthly counter (+{add}): {e}")
+
+
+def _days_left_in_month(now: datetime | None = None) -> int:
+    """Days left in this UTC month, today included."""
+    import calendar
+
+    now = now or datetime.utcnow()
+    return calendar.monthrange(now.year, now.month)[1] - now.day + 1
+
+
+def _next_month_start(now: datetime | None = None) -> str:
+    now = now or datetime.utcnow()
+    y, m = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
+    return f"{y:04d}-{m:02d}-01"
+
+
+async def _legiscan_cached_searches() -> dict[str, list[dict]]:
+    """Search results still fresh enough to reuse (see legiscan_search_cache_hours)."""
+    from storage.models import LegiScanSearchCache
+
+    cutoff = datetime.utcnow() - timedelta(hours=settings.legiscan_search_cache_hours)
+    out: dict[str, list[dict]] = {}
+    try:
+        async with async_session() as session:
+            rows = await session.execute(
+                select(LegiScanSearchCache).where(LegiScanSearchCache.fetched_at >= cutoff)
+            )
+            for row in rows.scalars().all():
+                out[row.query] = row.results or []
+    except Exception as e:
+        logger.warning(f"legiscan: could not load cached searches: {e}")
+    return out
+
+
+def _legiscan_paused(remaining: int) -> dict | None:
+    """Status block for a run that skips LegiScan because the month is used up."""
+    if remaining > 0:
+        return None
+    return {
+        "status": "paused",
+        "reason": "LegiScan monthly query budget used up (or LegiScan said we're over its limit)",
+        "resumes": _next_month_start(),
+    }
+
+
+async def _build_legiscan_search_adapter(seen: dict[int, str], remaining: int):
+    """Search adapter with today's cached searches and a paced getBill allowance."""
+    from adapters.legiscan import getbill_allowance
+    from adapters.legiscan_search import LegiScanSearchAdapter
+
+    cached = await _legiscan_cached_searches()
+    queries = settings.legiscan_search_queries_list
+    to_send = sum(1 for q in queries if q not in cached)
+    cap = getbill_allowance(
+        remaining, _days_left_in_month(), settings.legiscan_search_max_getbill, reserve=to_send
+    )
+    return LegiScanSearchAdapter(
+        seen_change_hashes=seen,
+        budget_remaining=remaining,
+        cached_searches=cached,
+        max_getbill=cap,
+    )
+
+
+async def _legiscan_after_run(adapter, results: dict) -> None:
+    """Persist a LegiScan adapter's spend, fetched hashes and fresh searches.
+
+    Runs whether the fetch succeeded or not. When LegiScan said the key is over
+    its monthly limit, marks the month used up (so later runs skip LegiScan
+    with no calls until the 1st) and posts one Slack note on that change.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from storage.models import LegiScanBill, LegiScanSearchCache
+
+    used = getattr(adapter, "queries_used", 0) or 0
+    await _record_legiscan_spend(used)
+    results[f"{adapter.source_name}_queries_used"] = used
+
+    fetched = getattr(adapter, "fetched_hashes", {}) or {}
+    fresh = getattr(adapter, "fresh_searches", {}) or {}
+    try:
+        async with async_session() as session:
+            now = datetime.utcnow()
+            for bid, ch in fetched.items():
+                if not ch:
+                    continue
+                stmt = pg_insert(LegiScanBill).values(bill_id=bid, change_hash=ch, fetched_at=now)
+                await session.execute(stmt.on_conflict_do_update(
+                    index_elements=["bill_id"], set_={"change_hash": ch, "fetched_at": now}
+                ))
+            for q, res in fresh.items():
+                stmt = pg_insert(LegiScanSearchCache).values(query=q, results=res, fetched_at=now)
+                await session.execute(stmt.on_conflict_do_update(
+                    index_elements=["query"], set_={"results": res, "fetched_at": now}
                 ))
             await session.commit()
     except Exception as e:
-        logger.warning(f"legiscan: could not record {n} queries of spend: {e}")
+        logger.warning(f"legiscan: could not save the bill/search cache: {e}")
+
+    if not getattr(adapter, "quota_exhausted", False):
+        return
+    message = adapter.quota_message or "LegiScan monthly limit reached"
+    results["legiscan"] = {
+        "status": "paused",
+        "reason": message,
+        "resumes": _next_month_start(),
+    }
+    # Our own budget guard already left the counter at the ceiling; only an
+    # answer from LegiScan needs the counter raised to stop later runs.
+    if "monthly limit reached" not in message:
+        return
+    try:
+        before = await _legiscan_month_used()
+    except Exception:
+        before = 0
+    await _bump_legiscan_counter(at_least=settings.legiscan_effective_budget)
+    if before < settings.legiscan_effective_budget and settings.slack_webhook_url:
+        try:
+            from digest.slack import send_to_slack
+
+            text = (
+                f"*LegiScan paused until {_next_month_start()}*: {message}. "
+                "LegiScan bill searches and details are skipped until then; "
+                "Open States and the other sources keep running."
+            )
+            blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+            await send_to_slack(settings.slack_webhook_url, blocks, fallback_text=text)
+        except Exception as e:
+            logger.error(f"Slack notice for LegiScan pause failed: {e}")
 
 
 async def _push_act_now_alerts(new_item_ids: list[int], results: dict) -> None:
@@ -882,7 +1031,6 @@ async def _run_pipeline_task(
         from adapters.courtlistener import CourtListenerAdapter
         from adapters.federal_register import FederalRegisterAdapter
         from adapters.legiscan import LegiScanAdapter
-        from adapters.legiscan_search import LegiScanSearchAdapter
         from adapters.legistar import LegistarAdapter
         from adapters.openstates import ALL_STATES, OpenStatesAdapter
         from adapters.wa_leg import WaLegAdapter
@@ -909,8 +1057,10 @@ async def _run_pipeline_task(
             # LegiScan for any requested gap state (e.g. CO, where OS search
             # misses on-topic bills like HB26-1196).
             ls_targets = [s for s in states_lower if s in gap_states]
-            if ls_targets:
+            if ls_targets and ls_budget > 0:
                 adapters.append(LegiScanAdapter(states=ls_targets, seen_change_hashes=ls_seen, budget_remaining=ls_budget))
+            elif ls_targets:
+                results["legiscan"] = _legiscan_paused(ls_budget)
             adapters.append(OpenStatesAdapter(states=states_filter))
         else:
             # Open States sweeps every state EXCEPT the ones LegiScan owns.
@@ -933,8 +1083,14 @@ async def _run_pipeline_task(
             # Standing queries over their index find bills whose summaries are
             # too thin for us to filter on (the HB26-1196 class of miss). The
             # per-state masterlist adapter remains for targeted ?state= runs.
-            if settings.legiscan_api_key:
-                adapters.append(LegiScanSearchAdapter(seen_change_hashes=ls_seen, budget_remaining=ls_budget))
+            # Searches already sent today are reused from the cache, and the
+            # getBill allowance is the month's remaining budget spread over the
+            # days left. With the month used up, LegiScan is skipped entirely
+            # (a status note, not an error) until the 1st.
+            if settings.legiscan_api_key and ls_budget > 0:
+                adapters.append(await _build_legiscan_search_adapter(ls_seen, ls_budget))
+            elif settings.legiscan_api_key:
+                results["legiscan"] = _legiscan_paused(ls_budget)
             if settings.courtlistener_api_token:
                 adapters.append(CourtListenerAdapter())
 
@@ -953,6 +1109,13 @@ async def _run_pipeline_task(
                 if per_state:
                     key = f"{adapter.source_name}_by_state"
                     results[key] = per_state
+                    if getattr(adapter, "quota_exhausted", False):
+                        # One line, not one per query/state: every call after
+                        # the first "over the limit" answer was skipped.
+                        results["errors"].append(
+                            f"{adapter.source_name}: stopped, {adapter.quota_message}"
+                        )
+                        per_state = {}
                     for st, info in per_state.items():
                         if info.get("error"):
                             results["errors"].append(
@@ -965,10 +1128,8 @@ async def _run_pipeline_task(
             # Persist this adapter's LegiScan query spend to the monthly counter
             # (runs whether the fetch succeeded or raised, so partial spend is
             # still accounted for).
-            qu = getattr(adapter, "queries_used", 0)
-            if qu and getattr(adapter, "source_name", "") in ("legiscan", "legiscan_search"):
-                await _record_legiscan_spend(qu)
-                results[f"{adapter.source_name}_queries_used"] = qu
+            if getattr(adapter, "source_name", "") in ("legiscan", "legiscan_search"):
+                await _legiscan_after_run(adapter, results)
 
         # ── Step 2: Enrich ──
         # First fetch the list of raw docs to process (in its own session)
@@ -2133,6 +2294,74 @@ async def relevance_audit(
     }
 
 
+@app.get("/admin/legiscan-usage")
+async def legiscan_usage(token: str | None = Query(default=None)):
+    """LegiScan query spend this month, the budget, and the caches. Read-only.
+
+      GET /admin/legiscan-usage?token=...
+
+    Our counter can lag LegiScan's own count a little (manual probes, calls
+    made before a deploy). LegiScan's number is in its over-limit message.
+    """
+    if not _check_admin_token(token):
+        return JSONResponse(status_code=403, content={"error": "Invalid admin token"})
+    from adapters.legiscan import getbill_allowance
+    from storage.models import LegiScanBill, LegiScanSearchCache
+
+    now = datetime.utcnow()
+    out: dict = {
+        "month": f"{now.year:04d}-{now.month:02d}",
+        "plan_limit": settings.legiscan_plan_limit,
+        "budget": settings.legiscan_effective_budget,
+        "configured_budget": settings.legiscan_monthly_budget,
+        "days_left_in_month": _days_left_in_month(now),
+        "search_cache_hours": settings.legiscan_search_cache_hours,
+    }
+    try:
+        used = await _legiscan_month_used()
+        remaining = max(0, settings.legiscan_effective_budget - used)
+        cached = await _legiscan_cached_searches()
+        queries = settings.legiscan_search_queries_list
+        to_send = sum(1 for q in queries if q not in cached)
+        out.update({
+            "used": used,
+            "remaining": remaining,
+            "paused": _legiscan_paused(remaining),
+            "next_run_getbill_allowance": getbill_allowance(
+                remaining, _days_left_in_month(now), settings.legiscan_search_max_getbill,
+                reserve=to_send,
+            ),
+            "searches_cached_fresh": len(cached),
+            "searches_next_run_will_send": to_send,
+        })
+        async with async_session() as session:
+            out["bills_in_hash_cache"] = (
+                await session.execute(select(func.count()).select_from(LegiScanBill))
+            ).scalar_one()
+            out["bills_fetched_last_24h"] = (
+                await session.execute(
+                    select(func.count()).select_from(LegiScanBill).where(
+                        LegiScanBill.fetched_at >= now - timedelta(hours=24)
+                    )
+                )
+            ).scalar_one()
+            out["search_cache"] = [
+                {"query": q, "fetched_at": f.isoformat() if f else None, "hits": len(r or [])}
+                for q, f, r in (
+                    await session.execute(
+                        select(
+                            LegiScanSearchCache.query,
+                            LegiScanSearchCache.fetched_at,
+                            LegiScanSearchCache.results,
+                        ).order_by(LegiScanSearchCache.query)
+                    )
+                ).all()
+            ]
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {str(e)[:300]}"
+    return out
+
+
 @app.get("/admin/legiscan-trace")
 async def legiscan_trace(
     bill_id: int,
@@ -2260,13 +2489,13 @@ async def cron_daily(token: str | None = Query(default=None)):
 
 
 async def _run_search_sweep_task():
-    """Frequent lightweight sweep: LegiScan full-text search only.
+    """Daily lightweight sweep: LegiScan full-text search only.
 
-    Unlike the daily full pipeline, this touches NO other source (no Open
-    States budget burn), so it can run every couple of hours — LegiScan's
-    search cache refreshes hourly, and change_hash makes a quiet run cost
-    just the ~16 standing search queries. Each run: search → ingest →
-    enrich exactly what was ingested → capped act-now Slack push.
+    Touches no other source. Runs once a day (cron-search.yml): the free
+    LegiScan key allows only 10,000 queries/month. A quiet run costs the 16
+    standing searches (cached for the daily pipeline that follows) plus
+    getBill only for bills whose change_hash moved. Each run: search → ingest
+    → enrich exactly what was ingested → capped act-now Slack push.
     """
     global _pipeline_status
     _pipeline_status = {"running": True, "last_run": datetime.utcnow().isoformat(), "last_result": None}
@@ -2276,17 +2505,13 @@ async def _run_search_sweep_task():
     results = {"ingested": 0, "enriched": 0, **new_run_counters(), "errors": []}
     new_item_ids: list[int] = []
     try:
-        from adapters.legiscan_search import LegiScanSearchAdapter
         from enrichment.pipeline import ingest_raw_doc
 
-        ls_seen = await _legiscan_seen_change_hashes()
         ls_budget = await _legiscan_budget_remaining()
         if ls_budget <= 0:
-            # Self-imposed monthly ceiling hit — skip rather than risk LegiScan's
-            # hard 30k/month suspend. Resets automatically next calendar month.
-            msg = "legiscan monthly budget exhausted; search sweep skipped"
-            logger.warning(msg)
-            results["errors"].append(msg)
+            # Month used up (our ceiling, or LegiScan said we're over): skip
+            # with no calls. Not an error; resumes on the 1st.
+            results["legiscan"] = _legiscan_paused(ls_budget)
             _pipeline_status = {
                 "running": False,
                 "last_run": datetime.utcnow().isoformat(),
@@ -2294,13 +2519,16 @@ async def _run_search_sweep_task():
             }
             _finish_run("search", run_token, results)
             return
-        adapter = LegiScanSearchAdapter(seen_change_hashes=ls_seen, budget_remaining=ls_budget)
+        ls_seen = await _legiscan_seen_change_hashes()
+        adapter = await _build_legiscan_search_adapter(ls_seen, ls_budget)
         try:
             docs = await adapter.fetch_new_items(datetime.utcnow())
         finally:
-            # Persist spend even if the sweep raised partway through.
-            await _record_legiscan_spend(adapter.queries_used)
+            # Persist spend, fetched hashes and searches even if it raised.
+            await _legiscan_after_run(adapter, results)
             results["legiscan_queries_used"] = adapter.queries_used
+        if adapter.quota_exhausted:
+            results["errors"].append(f"legiscan_search: stopped, {adapter.quota_message}")
 
         new_raw_ids: list[int] = []
         async with async_session() as session:
